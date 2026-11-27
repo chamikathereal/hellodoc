@@ -218,6 +218,9 @@ export function SessionsDataTable({
                 >
                   View details
                 </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => navigate(`/sessions/${session.id}/queue`)}>
+                  Manage queue
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={!canModify}
                   onClick={() =>

@@ -31,6 +31,10 @@ export type ConsultationSession = {
   internalNotes: string | null;
   version: number;
   cancellationReason: string | null;
+  /** Actual time the session was first opened (session detail only). */
+  openedAt?: string | null;
+  /** Actual time the session was closed, manually or automatically (session detail only). */
+  closedAt?: string | null;
 };
 
 export type PatientContact = {
@@ -104,6 +108,10 @@ export type Appointment = {
   /** Live queue state (RESERVED until check-in, then WAITING, CALLED, ...). */
   queueState?: string | null;
   checkedInAt?: string | null;
+  /** Actual queue timings recorded for this appointment. */
+  calledAt?: string | null;
+  consultationStartedAt?: string | null;
+  consultationEndedAt?: string | null;
   queueNumber: number;
   queueDisplay: string;
   bookingSource: 'PHONE' | 'WALK_IN' | string;
@@ -113,14 +121,22 @@ export type Appointment = {
   cancelledAt: string | null;
   rescheduledFromId: string | null;
   rescheduleReason: string | null;
+  /** Only on a RESCHEDULED appointment: the latest booking that replaced it. */
+  rescheduledToId?: string | null;
   version: number;
   createdAt: string;
   updatedAt: string;
 };
 
-/** Status shown to staff: a confirmed appointment reads "CHECKED IN" once the patient has checked in. */
-export function appointmentDisplayStatus(a: Pick<Appointment, 'status' | 'checkedInAt'>): string {
+/**
+ * Status shown to staff: a confirmed appointment reads "CHECKED IN" once the patient has checked in,
+ * and a cancelled appointment reads "CANCELLED SESSION" when its consultation session was cancelled.
+ */
+export function appointmentDisplayStatus(
+  a: Pick<Appointment, 'status' | 'checkedInAt'> & { sessionStatus?: string | null },
+): string {
   if (a.status === 'CONFIRMED' && a.checkedInAt) return 'CHECKED IN';
+  if (a.status === 'CANCELLED' && a.sessionStatus === 'CANCELLED') return 'CANCELLED SESSION';
   return a.status;
 }
 

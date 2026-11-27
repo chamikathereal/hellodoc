@@ -9,6 +9,11 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClinicContext } from '../clinic-context/clinic-context.service.js';
+import {
+  type ActiveMembership,
+  EMAIL_ALREADY_REGISTERED_MESSAGE,
+  hasConflictingClinicMembership,
+} from '../common/clinic-account-email.js';
 import { normalizeEmail } from '../common/identifiers.js';
 import {
   compareMoney,
@@ -113,8 +118,20 @@ export class BillingService {
     return this.inviteStaff(ctx, dto.email, 'CLINIC_RECEPTIONIST');
   }
 
+  /** See hasConflictingClinicMembership: a second clinic membership locks the user out of login. */
+  private async assertEmailAvailableForStaff(emailNormalized: string, allow?: ActiveMembership) {
+    const existing = await this.prisma.platformUser.findUnique({
+      where: { emailNormalized },
+      select: { memberships: { where: { active: true }, select: { tenantId: true, role: true } } },
+    });
+    if (hasConflictingClinicMembership(existing?.memberships ?? [], allow)) {
+      fail('EMAIL_ALREADY_REGISTERED', EMAIL_ALREADY_REGISTERED_MESSAGE, 'conflict');
+    }
+  }
+
   private async inviteStaff(ctx: ClinicContext, emailInput: string, role: 'CLINIC_CASHIER' | 'CLINIC_RECEPTIONIST') {
     const email = normalizeEmail(emailInput);
+    await this.assertEmailAvailableForStaff(email);
     const raw = randomBytes(32).toString('base64url');
     const tokenHash = createHash('sha256').update(raw).digest('hex');
     const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
@@ -169,6 +186,11 @@ export class BillingService {
     if (!invite || new Date(invite.expires_at).getTime() < Date.now()) {
       fail('BILLING_ACCESS_DENIED', 'Invitation is invalid or expired', 'forbidden');
     }
+    // Re-check at acceptance: the email may have been registered after the invitation was sent.
+    await this.assertEmailAvailableForStaff(invite.email_normalized, {
+      tenantId: invite.tenant_id,
+      role: invite.role,
+    });
     const passwordHash = await this.passwords.hash(dto.password);
     let user = await this.prisma.platformUser.findUnique({
       where: { emailNormalized: invite.email_normalized },
@@ -480,68 +502,82 @@ export class BillingService {
   }
 
   /**
-   * Called after a doctor signs a prescription: creates a DRAFT invoice for the appointment with
-   * the consultation fee and one line per prescribed medicine (priced 0.00 for the cashier to set).
-   * Does nothing when the appointment already has an invoice that is not voided.
+   * Appointments ready for the cashier in POS: the doctor has signed the prescription and the
+   * appointment has no invoice yet (voided invoices do not count).
    */
-  async createDraftForPrescription(
-    ctx: ClinicContext,
-    input: {
-      appointmentId: string;
-      patientId: string;
-      medicines: Array<{ name: string; dose: string | null; frequency: string | null }>;
-    },
-  ): Promise<{ invoiceId: string; created: boolean } | null> {
-    const existing = await this.sql.withClient((client) =>
-      client.query<{ id: string }>(
-        `SELECT id FROM ${ctx.quotedSchema}.invoices
-         WHERE appointment_id = $1 AND status <> 'VOIDED'
-         ORDER BY created_at DESC LIMIT 1`,
-        [input.appointmentId],
-      ),
-    );
-    if (existing.rows[0]) return { invoiceId: existing.rows[0].id, created: false };
-
-    const services = await this.sql.withClient((client) =>
-      client.query<{ id: string; code: string; is_default: boolean }>(
-        `SELECT s.id, s.code, (s.id = st.default_service_id) AS is_default
-         FROM ${ctx.quotedSchema}.billing_services s
-         LEFT JOIN ${ctx.quotedSchema}.billing_settings st ON st.id = TRUE
-         WHERE s.active = TRUE`,
-      ),
-    );
-    const consultation =
-      services.rows.find((s) => s.is_default) ?? services.rows.find((s) => s.code === 'DOC_CONSULT');
-    const medicineService =
-      services.rows.find((s) => s.code === 'MEDICINES') ?? services.rows.find((s) => s.code === 'OTHER_SERVICES');
-
-    const items: CreateInvoiceDto['items'] = [];
-    if (consultation) items.push({ serviceId: consultation.id, quantity: 1 });
-    if (medicineService) {
-      for (const medicine of input.medicines.slice(0, 19)) {
-        const detail = [medicine.dose, medicine.frequency].filter(Boolean).join(', ');
-        items.push({
-          serviceId: medicineService.id,
-          quantity: 1,
-          unitPrice: '0.00',
-          description: `Medicine: ${medicine.name}${detail ? ` (${detail})` : ''}`.slice(0, 200),
-        });
-      }
-    }
-    if (items.length === 0) return null;
-
-    const invoice = await this.createInvoice(ctx, {
-      patientId: input.patientId,
-      appointmentId: input.appointmentId,
-      items,
+  async listBillableAppointments(ctx: ClinicContext) {
+    return this.sql.withClient(async (client) => {
+      const rows = await client.query<{
+        appointment_id: string;
+        booking_reference: string;
+        queue_number: number;
+        patient_id: string;
+        patient_name: string;
+        patient_number: string;
+        doctor_name: string;
+        local_date: string;
+        start_at: Date;
+        end_at: Date;
+        prescription_id: string;
+        signed_at: Date | null;
+        medicines: Array<{ medicine_name: string; dose: string | null; frequency: string | null }> | null;
+      }>(
+        `SELECT DISTINCT ON (a.id)
+                a.id AS appointment_id,
+                a.booking_reference,
+                a.queue_number,
+                a.patient_id,
+                pt.full_name AS patient_name,
+                pt.patient_number,
+                d.display_name AS doctor_name,
+                to_char(s.local_date, 'YYYY-MM-DD') AS local_date,
+                s.start_at,
+                s.end_at,
+                p.id AS prescription_id,
+                p.signed_at,
+                (
+                  SELECT json_agg(
+                    json_build_object('medicine_name', i.medicine_name, 'dose', i.dose, 'frequency', i.frequency)
+                    ORDER BY i.sort_order
+                  )
+                  FROM ${ctx.quotedSchema}.prescription_items i
+                  WHERE i.prescription_id = p.id
+                ) AS medicines
+         FROM ${ctx.quotedSchema}.prescriptions p
+         JOIN ${ctx.quotedSchema}.clinical_encounters e ON e.id = p.encounter_id
+         JOIN ${ctx.quotedSchema}.appointments a ON a.id = e.appointment_id
+         JOIN ${ctx.quotedSchema}.patients pt ON pt.id = a.patient_id
+         JOIN ${ctx.quotedSchema}.consultation_sessions s ON s.id = a.session_id
+         JOIN ${ctx.quotedSchema}.doctors d ON d.id = s.doctor_id
+         WHERE p.status = 'SIGNED'
+           AND a.status = 'CONFIRMED'
+           AND pt.status = 'ACTIVE'
+           AND NOT EXISTS (
+             SELECT 1 FROM ${ctx.quotedSchema}.invoices inv
+             WHERE inv.appointment_id = a.id AND inv.status <> 'VOIDED'
+           )
+         ORDER BY a.id, p.signed_at DESC NULLS LAST`,
+      );
+      const items = rows.rows
+        .map((r) => ({
+          appointmentId: r.appointment_id,
+          bookingReference: r.booking_reference,
+          queueDisplay: String(r.queue_number).padStart(3, '0'),
+          patientId: r.patient_id,
+          patientName: r.patient_name,
+          patientNumber: r.patient_number,
+          doctorName: r.doctor_name,
+          localDate: r.local_date,
+          startAt: r.start_at.toISOString(),
+          endAt: r.end_at.toISOString(),
+          prescriptionId: r.prescription_id,
+          signedAt: r.signed_at ? r.signed_at.toISOString() : null,
+          medicines: r.medicines ?? [],
+        }))
+        .sort((x, y) => (y.signedAt ?? '').localeCompare(x.signedAt ?? ''))
+        .slice(0, 200);
+      return { items };
     });
-    await this.sql.withClient((client) =>
-      this.auditBilling(client, ctx, 'billing.invoice_auto_created', 'invoice', invoice.id, {
-        source: 'prescription_signed',
-        appointmentId: input.appointmentId,
-      }),
-    );
-    return { invoiceId: invoice.id, created: true };
   }
 
   async getInvoice(ctx: ClinicContext, id: string) {

@@ -122,6 +122,13 @@ export class BillingController {
   }
 
   @Roles('clinic_manager', 'clinic_cashier')
+  @Get('clinic/billing/billable-appointments')
+  @Header('Cache-Control', 'no-store')
+  billableAppointments(@CurrentSession() session: AuthenticatedSession) {
+    return this.clinicContext.resolveFinance(session).then((ctx) => this.billing.listBillableAppointments(ctx));
+  }
+
+  @Roles('clinic_manager', 'clinic_cashier')
   @Post('clinic/invoices')
   create(@CurrentSession() session: AuthenticatedSession, @Body() dto: CreateInvoiceDto) {
     return this.clinicContext.resolveFinance(session).then((ctx) => this.billing.createInvoice(ctx, dto));

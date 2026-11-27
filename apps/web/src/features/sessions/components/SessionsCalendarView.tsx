@@ -93,13 +93,15 @@ export function SessionsCalendarView({
                     month: 'short',
                   })}
                 </p>
-                <button
-                  type="button"
-                  className="text-[10px] font-medium text-primary hover:underline"
-                  onClick={() => onCreateDate?.(date)}
-                >
-                  + Add
-                </button>
+                {onCreateDate ? (
+                  <button
+                    type="button"
+                    className="text-[10px] font-medium text-primary hover:underline"
+                    onClick={() => onCreateDate(date)}
+                  >
+                    + Add
+                  </button>
+                ) : null}
               </div>
               <div className="space-y-1.5">
                 {daySessions.length === 0 ? (
@@ -109,9 +111,11 @@ export function SessionsCalendarView({
                     <button
                       key={session.id}
                       type="button"
+                      disabled={!onSelectSession}
                       onClick={() => onSelectSession?.(session.id)}
                       className={cn(
-                        'block w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground cursor-pointer',
+                        'block w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors',
+                        onSelectSession && 'hover:bg-accent hover:text-accent-foreground cursor-pointer',
                         session.status === 'CANCELLED' && 'border-destructive/20 bg-destructive/10 opacity-80',
                       )}
                     >
@@ -150,13 +154,15 @@ export function SessionsCalendarView({
                     month: 'short',
                   })}
                 </p>
-                <button
-                  type="button"
-                  className="text-xs text-primary hover:underline"
-                  onClick={() => onCreateDate?.(date)}
-                >
-                  + Add
-                </button>
+                {onCreateDate ? (
+                  <button
+                    type="button"
+                    className="text-xs text-primary hover:underline"
+                    onClick={() => onCreateDate(date)}
+                  >
+                    + Add
+                  </button>
+                ) : null}
               </div>
               {daySessions.length === 0 ? (
                 <p className="text-xs text-muted-foreground">No sessions</p>
@@ -166,8 +172,12 @@ export function SessionsCalendarView({
                     <button
                       key={session.id}
                       type="button"
+                      disabled={!onSelectSession}
                       onClick={() => onSelectSession?.(session.id)}
-                      className="flex w-full items-start justify-between gap-2 rounded-md border px-3 py-2 text-left hover:bg-muted/50 cursor-pointer"
+                      className={cn(
+                        'flex w-full items-start justify-between gap-2 rounded-md border px-3 py-2 text-left',
+                        onSelectSession && 'hover:bg-muted/50 cursor-pointer',
+                      )}
                     >
                       <div className="min-w-0">
                         <p className="text-sm font-medium break-words">{session.doctorDisplayName}</p>

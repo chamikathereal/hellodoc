@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
+import { AppointmentTimingsCard } from '@/components/appointment-timings-card';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -14,6 +15,8 @@ export function AppointmentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [appointment, setAppointment] = useState<Appointment | null>(null);
+  /** For a RESCHEDULED appointment: the current booking that replaced it. */
+  const [currentBooking, setCurrentBooking] = useState<Appointment | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
@@ -31,6 +34,11 @@ export function AppointmentDetailPage() {
     try {
       const data = await api<Appointment>(`/clinic/appointments/${id}`);
       setAppointment(data);
+      setCurrentBooking(
+        data.status === 'RESCHEDULED' && data.rescheduledToId
+          ? await api<Appointment>(`/clinic/appointments/${data.rescheduledToId}`)
+          : null,
+      );
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load appointment');
     }
@@ -40,12 +48,16 @@ export function AppointmentDetailPage() {
     void load();
   }, [id]);
 
+  // Reschedule/cancel act on this appointment, or on the booking that replaced it when it was rescheduled.
+  const actionTarget = appointment?.status === 'RESCHEDULED' ? currentBooking : appointment;
+  const canChangeBooking = actionTarget?.status === 'CONFIRMED' && !actionTarget.checkedInAt;
+
   useEffect(() => {
-    if (!showReschedule || !appointment?.doctorId) return;
+    if (!showReschedule || !actionTarget?.doctorId) return;
     const from = clinicTodayIso();
     const to = addDaysIso(from, 21);
     const qs = new URLSearchParams({
-      doctorId: appointment.doctorId,
+      doctorId: actionTarget.doctorId,
       status: 'SCHEDULED',
       from,
       to,
@@ -55,25 +67,26 @@ export function AppointmentDetailPage() {
       .then((data) =>
         setSessions(
           data.items.filter(
-            (s) => s.id !== appointment.sessionId && new Date(s.endAt).getTime() > Date.now(),
+            (s) => s.id !== actionTarget.sessionId && new Date(s.endAt).getTime() > Date.now(),
           ),
         ),
       )
       .catch(() => setSessions([]));
-  }, [showReschedule, appointment?.doctorId, appointment?.sessionId]);
+  }, [showReschedule, actionTarget?.doctorId, actionTarget?.sessionId]);
 
   if (error) return <p className="text-sm text-destructive">{error}</p>;
   if (!appointment) return <p className="text-sm text-muted-foreground">Loading…</p>;
 
   const onCancel = async () => {
-    if (cancelReason.trim().length < 3) return;
+    if (cancelReason.trim().length < 3 || !actionTarget) return;
     setBusy(true);
     try {
-      const updated = await api<Appointment>(`/clinic/appointments/${appointment.id}/cancel`, {
+      const updated = await api<Appointment>(`/clinic/appointments/${actionTarget.id}/cancel`, {
         method: 'POST',
         json: { reason: cancelReason.trim() },
       });
-      setAppointment(updated);
+      if (actionTarget.id === appointment.id) setAppointment(updated);
+      else setCurrentBooking(updated);
       setShowCancel(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Cancel failed');
@@ -83,10 +96,10 @@ export function AppointmentDetailPage() {
   };
 
   const onReschedule = async () => {
-    if (!newSessionId) return;
+    if (!newSessionId || !actionTarget) return;
     setBusy(true);
     try {
-      const created = await api<Appointment>(`/clinic/appointments/${appointment.id}/reschedule`, {
+      const created = await api<Appointment>(`/clinic/appointments/${actionTarget.id}/reschedule`, {
         method: 'POST',
         json: {
           newSessionId,
@@ -177,17 +190,18 @@ export function AppointmentDetailPage() {
               >
                 Copy Tracking Link
               </Button>
-              {/* After check-in the appointment follows the consultation workflow: no reschedule or cancel. */}
-              {!appointment.checkedInAt ? (
-                <>
-                  <Button type="button" variant="secondary" onClick={() => setShowReschedule(true)}>
-                    Reschedule
-                  </Button>
-                  <Button type="button" variant="outline" onClick={() => setShowCancel(true)}>
-                    Cancel
-                  </Button>
-                </>
-              ) : null}
+            </>
+          ) : null}
+          {/* Confirmed (or the booking that replaced a rescheduled one): reschedule and cancel are allowed.
+              Checked in or cancelled: no further reschedule or cancel. */}
+          {canChangeBooking ? (
+            <>
+              <Button type="button" variant="secondary" onClick={() => setShowReschedule(true)}>
+                Reschedule
+              </Button>
+              <Button type="button" variant="outline" onClick={() => setShowCancel(true)}>
+                Cancel
+              </Button>
             </>
           ) : null}
           <Link to="/appointments">
@@ -280,6 +294,16 @@ export function AppointmentDetailPage() {
               <span className="text-muted-foreground">Cancellation:</span> {appointment.cancellationReason}
             </p>
           ) : null}
+          {appointment.status === 'RESCHEDULED' && currentBooking ? (
+            <p className="sm:col-span-2">
+              <span className="text-muted-foreground">Rescheduled to:</span>{' '}
+              <Link className="text-primary underline" to={`/appointments/${currentBooking.id}`}>
+                {currentBooking.bookingReference}
+              </Link>{' '}
+              ({appointmentDisplayStatus(currentBooking)}
+              {currentBooking.localDate ? ` · ${currentBooking.localDate}` : ''})
+            </p>
+          ) : null}
           {appointment.rescheduledFromId ? (
             <p className="sm:col-span-2">
               <span className="text-muted-foreground">Rescheduled from:</span>{' '}
@@ -291,6 +315,8 @@ export function AppointmentDetailPage() {
         </CardContent>
       </Card>
 
+      <AppointmentTimingsCard appointment={appointment} />
+
       {showCancel ? (
         <Card>
           <CardHeader>
@@ -298,7 +324,11 @@ export function AppointmentDetailPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              Queue number {appointment.queueDisplay} remains reserved and will not be reused.
+              {actionTarget && actionTarget.id !== appointment.id
+                ? `This cancels the current booking ${actionTarget.bookingReference}. `
+                : ''}
+              Queue number {actionTarget?.queueDisplay ?? appointment.queueDisplay} remains reserved and will
+              not be reused.
             </p>
             <div>
               <Label>Reason</Label>
@@ -326,6 +356,11 @@ export function AppointmentDetailPage() {
             <h2 className="font-semibold">Reschedule appointment</h2>
           </CardHeader>
           <CardContent className="space-y-3">
+            {actionTarget && actionTarget.id !== appointment.id ? (
+              <p className="text-sm text-muted-foreground">
+                This reschedules the current booking {actionTarget.bookingReference}.
+              </p>
+            ) : null}
             <div>
               <Label>New session</Label>
               <select

@@ -8,7 +8,12 @@ import { randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClinicContext } from '../clinic-context/clinic-context.service.js';
 import { TenantSqlClient } from '../tenant-provisioning/tenant-sql.client.js';
-import { CreateScheduleTemplatesDto, MaterializeScheduleDto } from './dto/schedule.dto.js';
+import {
+  BulkUpdateTemplateSessionsDto,
+  CreateScheduleTemplatesDto,
+  DeactivateScheduleTemplateDto,
+  MaterializeScheduleDto,
+} from './dto/schedule.dto.js';
 
 const DEFAULT_TZ = 'Asia/Colombo';
 const DEFAULT_HORIZON_DAYS = 90;
@@ -171,14 +176,23 @@ export class SchedulesService {
 
       let materializeResult = null;
       if (dto.materialize !== false) {
-        materializeResult = await this.materializeTemplates(client, ctx, created.map((t) => t.id), DEFAULT_HORIZON_DAYS);
+        materializeResult = await this.materializeTemplates(
+          client,
+          ctx,
+          created.map((t) => t.id),
+          dto.horizonDays ?? DEFAULT_HORIZON_DAYS,
+        );
       }
 
       return { templates: created, materialize: materializeResult };
     });
   }
 
-  async deactivate(ctx: ClinicContext, templateId: string) {
+  async deactivate(ctx: ClinicContext, templateId: string, dto: DeactivateScheduleTemplateDto) {
+    const reason = dto.reason.trim();
+    if (reason.length < 3) {
+      throw new BadRequestException('Reason for deactivation must be at least 3 characters');
+    }
     return this.sql.withClient(async (client) => {
       await client.query('BEGIN');
       try {
@@ -212,7 +226,7 @@ export class SchedulesService {
                WHERE a.session_id = s.id AND a.status = 'CONFIRMED'
              )
            RETURNING s.id`,
-          [templateId, ctx.userId, TEMPLATE_DEACTIVATED_REASON],
+          [templateId, ctx.userId, `${TEMPLATE_DEACTIVATED_REASON}: ${reason}`],
         );
 
         // Sessions with confirmed bookings are kept so patients are not dropped silently;
@@ -235,6 +249,7 @@ export class SchedulesService {
           targetId: templateId,
           metadata: {
             tenantId: ctx.tenantId,
+            reason,
             cancelledSessions: cancelled.rowCount ?? 0,
             keptSessionsWithBookings: keptWithBookings.rows.length,
           },
@@ -295,6 +310,110 @@ export class SchedulesService {
         metadata: { tenantId: ctx.tenantId, created: materializeResult.created },
       });
       return { template: mapTemplate(updated.rows[0]), materialize: materializeResult };
+    });
+  }
+
+  /**
+   * Sets a new capacity and duration on a template and on all of its upcoming SCHEDULED sessions.
+   * A session is skipped (left unchanged) when the new values do not fit its time, or when it
+   * already has more confirmed bookings than the new capacity.
+   */
+  async bulkUpdateSessions(ctx: ClinicContext, templateId: string, dto: BulkUpdateTemplateSessionsDto) {
+    const capacity = dto.capacity;
+    const duration = dto.expectedDurationMinutes;
+    return this.sql.withClient(async (client) => {
+      await client.query('BEGIN');
+      try {
+        const existing = await client.query<TemplateRow>(
+          `SELECT * FROM ${ctx.quotedSchema}.schedule_templates WHERE id = $1 FOR UPDATE`,
+          [templateId],
+        );
+        const template = existing.rows[0];
+        if (!template) throw new NotFoundException('Schedule template not found');
+        assertSlotConfiguration(
+          String(template.local_start_time).slice(0, 5),
+          String(template.local_end_time).slice(0, 5),
+          capacity,
+          duration,
+        );
+
+        const updatedTemplate = await client.query<TemplateRow>(
+          `UPDATE ${ctx.quotedSchema}.schedule_templates
+           SET default_capacity = $2, expected_duration_minutes = $3, updated_by = $4, updated_at = NOW()
+           WHERE id = $1
+           RETURNING *`,
+          [templateId, capacity, duration, ctx.userId],
+        );
+
+        const sessions = await client.query<{
+          id: string;
+          local_date: string;
+          session_minutes: number;
+          booked: number;
+        }>(
+          `SELECT s.id,
+                  to_char(s.local_date, 'YYYY-MM-DD') AS local_date,
+                  (EXTRACT(EPOCH FROM (s.end_at - s.start_at)) / 60)::int AS session_minutes,
+                  (SELECT count(*)::int FROM ${ctx.quotedSchema}.appointments a
+                   WHERE a.session_id = s.id AND a.status = 'CONFIRMED') AS booked
+           FROM ${ctx.quotedSchema}.consultation_sessions s
+           WHERE s.schedule_template_id = $1
+             AND s.status = 'SCHEDULED'
+             AND s.start_at > NOW()
+           ORDER BY s.start_at ASC
+           FOR UPDATE OF s`,
+          [templateId],
+        );
+
+        let updated = 0;
+        const skipped: Array<{ date: string; reason: string }> = [];
+        for (const row of sessions.rows) {
+          if (capacity < row.booked) {
+            skipped.push({
+              date: row.local_date,
+              reason: `${row.booked} patient(s) already booked, more than the new capacity`,
+            });
+            continue;
+          }
+          if (duration > row.session_minutes || capacity * duration > row.session_minutes) {
+            skipped.push({
+              date: row.local_date,
+              reason: `${capacity} patients × ${duration} min does not fit in this ${row.session_minutes} min session`,
+            });
+            continue;
+          }
+          await client.query(
+            `UPDATE ${ctx.quotedSchema}.consultation_sessions SET
+               capacity = $2,
+               expected_duration_minutes = $3,
+               updated_by = $4,
+               updated_at = NOW(),
+               version = version + 1
+             WHERE id = $1 AND status = 'SCHEDULED'`,
+            [row.id, capacity, duration, ctx.userId],
+          );
+          updated += 1;
+        }
+
+        await client.query('COMMIT');
+        await this.audit.record({
+          actorId: ctx.userId,
+          action: 'schedule_template.sessions_bulk_updated',
+          targetType: 'schedule_template',
+          targetId: templateId,
+          metadata: {
+            tenantId: ctx.tenantId,
+            capacity,
+            expectedDurationMinutes: duration,
+            updatedSessions: updated,
+            skippedSessions: skipped.length,
+          },
+        });
+        return { template: mapTemplate(updatedTemplate.rows[0]!), updatedSessions: updated, skipped };
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      }
     });
   }
 

@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/sheet';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { api, ApiError } from '@/lib/api';
+import { isSriLankanMobile, SRI_LANKA_MOBILE_HINT, SRI_LANKA_MOBILE_MESSAGE } from '@/lib/phone';
 import { notify } from '@/lib/notify';
 import type { Doctor } from '@/lib/clinic-types';
 
@@ -40,7 +41,7 @@ const schema = z.object({
   contactNumber: z
     .string()
     .trim()
-    .regex(/^$|^[0-9+\-\s()]{7,20}$/, 'Enter a valid phone number')
+    .refine((v) => v === '' || isSriLankanMobile(v), SRI_LANKA_MOBILE_MESSAGE)
     .optional(),
   email: z.string().trim().email('Enter a valid email address').optional().or(z.literal('')),
   confirmDuplicate: z.boolean().optional(),
@@ -219,7 +220,12 @@ export function DoctorFormDialog({
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="doctor-phone">Phone</Label>
-              <Input id="doctor-phone" {...form.register('contactNumber')} />
+              <Input
+                id="doctor-phone"
+                type="tel"
+                placeholder={SRI_LANKA_MOBILE_HINT}
+                {...form.register('contactNumber')}
+              />
               {form.formState.errors.contactNumber ? (
                 <p className="text-xs text-destructive">{form.formState.errors.contactNumber.message}</p>
               ) : null}

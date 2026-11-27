@@ -13,13 +13,14 @@ type Prescription = {
   id: string;
   status: string;
   version: number;
-  items?: Array<{ medicine_name: string; dose: string; frequency: string }>;
+  clinical_instructions?: string | null;
+  items?: Array<{ medicine_name: string; dose: string; frequency: string; instructions?: string | null }>;
 };
 
-type MedicineRow = { key: string; medicineName: string; dose: string; frequency: string };
+type MedicineRow = { key: string; medicineName: string; dose: string; frequency: string; instructions: string };
 
 function blankMedicine(): MedicineRow {
-  return { key: crypto.randomUUID(), medicineName: '', dose: '', frequency: '' };
+  return { key: crypto.randomUUID(), medicineName: '', dose: '', frequency: '', instructions: '' };
 }
 
 /** Returns a clear message for the first incomplete medicine, or null when all rows are valid. */
@@ -75,6 +76,7 @@ export function ConsultationPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [medicines, setMedicines] = useState<MedicineRow[]>(() => [blankMedicine()]);
+  const [rxNotes, setRxNotes] = useState('');
   const [systolic, setSystolic] = useState('');
   const [diastolic, setDiastolic] = useState('');
   const [pulse, setPulse] = useState('');
@@ -97,8 +99,10 @@ export function ConsultationPage() {
             medicineName: item.medicine_name ?? '',
             dose: item.dose ?? '',
             frequency: item.frequency ?? '',
+            instructions: item.instructions ?? '',
           })),
         );
+        setRxNotes(data.prescription.clinical_instructions ?? '');
       }
     }
   };
@@ -195,15 +199,21 @@ export function ConsultationPage() {
     }
   };
 
+  // Allergy changes only refresh the allergy list. Reloading the whole consultation here would
+  // overwrite clinical notes (and prescription rows) the doctor has typed but not saved yet.
+  const applyAllergies = (allergies: Encounter['allergies']) => {
+    setEncounter((current) => (current ? { ...current, allergies } : current));
+  };
+
   const markNoKnownAllergies = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api(`/clinic/patients/${encounter.patient_id}/allergy-status`, {
+      const allergies = await api<Encounter['allergies']>(`/clinic/patients/${encounter.patient_id}/allergy-status`, {
         method: 'POST',
         json: { status: 'NO_KNOWN_ALLERGIES' },
       });
-      await load();
+      applyAllergies(allergies);
       setMessage('Allergy status updated to no known allergies');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Allergy update failed');
@@ -221,7 +231,7 @@ export function ConsultationPage() {
     setBusy(true);
     setError(null);
     try {
-      await api(`/clinic/allergies`, {
+      const allergies = await api<Encounter['allergies']>(`/clinic/allergies`, {
         method: 'POST',
         json: {
           patientId: encounter.patient_id,
@@ -233,7 +243,7 @@ export function ConsultationPage() {
       setAllergySubstance('');
       setAllergyReaction('');
       setAllergySeverity('');
-      await load();
+      applyAllergies(allergies);
       setMessage(`Allergy recorded: ${substance}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not record allergy');
@@ -246,8 +256,11 @@ export function ConsultationPage() {
     setBusy(true);
     setError(null);
     try {
-      await api(`/clinic/allergies/${allergyId}/remove`, { method: 'POST', json: {} });
-      await load();
+      const allergies = await api<Encounter['allergies']>(`/clinic/allergies/${allergyId}/remove`, {
+        method: 'POST',
+        json: {},
+      });
+      applyAllergies(allergies);
       setMessage(`Allergy removed: ${substance}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not remove allergy');
@@ -280,10 +293,12 @@ export function ConsultationPage() {
         method: 'POST',
         json: {
           version: target.version ?? 1,
+          clinicalInstructions: rxNotes.trim() || undefined,
           items: medicines.map((row) => ({
             medicineName: row.medicineName.trim(),
             dose: row.dose.trim(),
             frequency: row.frequency.trim(),
+            instructions: row.instructions.trim() || undefined,
           })),
         },
       });
@@ -301,19 +316,12 @@ export function ConsultationPage() {
     setBusy(true);
     setError(null);
     try {
-      const signed = await api<Prescription & { invoice?: { invoiceId: string; created: boolean } | null }>(
-        `/clinic/prescriptions/${prescription.id}/sign`,
-        {
-          method: 'POST',
-          json: { version: prescription.version },
-        },
-      );
+      const signed = await api<Prescription>(`/clinic/prescriptions/${prescription.id}/sign`, {
+        method: 'POST',
+        json: { version: prescription.version },
+      });
       setPrescription(signed);
-      setMessage(
-        signed.invoice?.created
-          ? 'Prescription signed. A draft invoice with the consultation fee and prescribed medicines was sent to billing.'
-          : `Prescription ${signed.status.toLowerCase()}`,
-      );
+      setMessage('Prescription signed. The cashier can now bill this visit from POS.');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Prescription sign failed');
     } finally {
@@ -450,18 +458,25 @@ export function ConsultationPage() {
                   {(prescription?.items ?? []).map((item, index) => (
                     <div
                       key={`${item.medicine_name}-${index}`}
-                      className="grid gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 sm:grid-cols-3"
+                      className="grid gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 sm:grid-cols-4"
                     >
                       <p className="font-medium text-foreground">{item.medicine_name}</p>
                       <p className="text-muted-foreground">{item.dose}</p>
                       <p className="text-muted-foreground">{item.frequency}</p>
+                      <p className="text-muted-foreground">{item.instructions || '—'}</p>
                     </div>
                   ))}
+                  {prescription?.clinical_instructions ? (
+                    <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+                      <p className="font-medium text-foreground">Additional notes</p>
+                      <p className="whitespace-pre-wrap text-muted-foreground">{prescription.clinical_instructions}</p>
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 <div className="space-y-3">
                   {medicines.map((row, index) => (
-                    <div key={row.key} className="grid gap-3 sm:grid-cols-[1fr_1fr_1fr_auto] sm:items-end">
+                    <div key={row.key} className="grid gap-3 sm:grid-cols-2 sm:items-end lg:grid-cols-[1fr_1fr_1fr_1.4fr_auto]">
                       <div>
                         <Label htmlFor={`medicine-${row.key}`}>
                           {medicines.length > 1 ? `Medicine ${index + 1}` : 'Medicine'}
@@ -494,6 +509,16 @@ export function ConsultationPage() {
                           onChange={(event) => updateMedicine(row.key, { frequency: event.target.value })}
                         />
                       </div>
+                      <div>
+                        <Label htmlFor={`instructions-${row.key}`}>Instructions</Label>
+                        <Input
+                          id={`instructions-${row.key}`}
+                          className="mt-1.5"
+                          placeholder="After meals"
+                          value={row.instructions}
+                          onChange={(event) => updateMedicine(row.key, { instructions: event.target.value })}
+                        />
+                      </div>
                       <Button
                         type="button"
                         variant="outline"
@@ -517,6 +542,17 @@ export function ConsultationPage() {
                     <Plus className="mr-1.5 size-4" />
                     Add medicine
                   </Button>
+                  <div>
+                    <Label htmlFor="prescription-notes">Additional notes</Label>
+                    <textarea
+                      id="prescription-notes"
+                      className={`${noteClass} mt-1.5`}
+                      placeholder="Any other advice for the patient or pharmacist"
+                      value={rxNotes}
+                      disabled={encounter.status !== 'SIGNED'}
+                      onChange={(event) => setRxNotes(event.target.value)}
+                    />
+                  </div>
                 </div>
               )}
               <div className="flex flex-wrap gap-2">

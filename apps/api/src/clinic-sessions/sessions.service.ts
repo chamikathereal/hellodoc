@@ -7,6 +7,9 @@ import {
 import { randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
 import type { ClinicContext } from '../clinic-context/clinic-context.service.js';
+import { NotificationsService } from '../clinic-notifications/notifications.service.js';
+import { SmsDispatcherService } from '../clinic-notifications/sms-dispatcher.service.js';
+import { QueueService } from '../clinic-queue/queue.service.js';
 import { TenantSqlClient } from '../tenant-provisioning/tenant-sql.client.js';
 import {
   CancelSessionDto,
@@ -91,6 +94,9 @@ export class SessionsService {
   constructor(
     private readonly sql: TenantSqlClient,
     private readonly audit: AuditService,
+    private readonly queue: QueueService,
+    private readonly notifications: NotificationsService,
+    private readonly smsDispatcher: SmsDispatcherService,
   ) {}
 
   async list(ctx: ClinicContext, query: ListSessionsQueryDto) {
@@ -138,15 +144,25 @@ export class SessionsService {
 
   async get(ctx: ClinicContext, id: string) {
     return this.sql.withClient(async (client) => {
-      const result = await client.query<SessionRow>(
-        `SELECT s.*, d.display_name AS doctor_display_name
+      const result = await client.query<SessionRow & { opened_at: Date | null; closed_at: Date | null }>(
+        `SELECT s.*, d.display_name AS doctor_display_name,
+                -- Actual open/close times come from the queue event log (first open, last close).
+                (SELECT MIN(e.created_at) FROM ${ctx.quotedSchema}.queue_events e
+                 WHERE e.session_id = s.id AND e.event_type = 'SESSION_OPEN') AS opened_at,
+                (SELECT MAX(e.created_at) FROM ${ctx.quotedSchema}.queue_events e
+                 WHERE e.session_id = s.id AND e.event_type = 'SESSION_CLOSED') AS closed_at
          FROM ${ctx.quotedSchema}.consultation_sessions s
          JOIN ${ctx.quotedSchema}.doctors d ON d.id = s.doctor_id
          WHERE s.id = $1`,
         [id],
       );
-      if (!result.rows[0]) throw new NotFoundException('Session not found');
-      return mapSession(result.rows[0]);
+      const row = result.rows[0];
+      if (!row) throw new NotFoundException('Session not found');
+      return {
+        ...mapSession(row),
+        openedAt: row.opened_at?.toISOString() ?? null,
+        closedAt: row.closed_at?.toISOString() ?? null,
+      };
     });
   }
 
@@ -169,6 +185,7 @@ export class SessionsService {
       const bounds = await this.resolveBounds(client, dto.localDate, dto.startTime, dto.endTime, timezone);
       this.assertNotEnded(bounds.startAt, bounds.endAt);
       this.assertMinLength(bounds.startAt, bounds.endAt);
+      this.assertCapacityFits(bounds.startAt, bounds.endAt, capacity, expectedDurationMinutes);
 
       const id = randomUUID();
       try {
@@ -311,15 +328,42 @@ export class SessionsService {
         if (!updated.rows[0]) {
           throw new BadRequestException('Only future SCHEDULED sessions can be cancelled');
         }
+
+        // Bookings in a cancelled session are cancelled too, and each patient gets the cancellation SMS.
+        const cancelledAppointments = await client.query<{ id: string }>(
+          `UPDATE ${ctx.quotedSchema}.appointments SET
+             status = 'CANCELLED',
+             cancellation_reason = $2,
+             cancelled_at = NOW(),
+             cancelled_by = $3,
+             updated_at = NOW(),
+             updated_by = $3,
+             version = version + 1
+           WHERE session_id = $1 AND status = 'CONFIRMED'
+           RETURNING id`,
+          [id, `Session cancelled: ${dto.reason.trim()}`, ctx.userId],
+        );
+        for (const appointment of cancelledAppointments.rows) {
+          await this.queue.invalidateForAppointment(client, ctx.quotedSchema, appointment.id);
+          await this.notifications.enqueueForAppointment(client, ctx, {
+            appointmentId: appointment.id,
+            eventType: 'CANCELLATION',
+            dedupeKey: `CANCELLATION:${appointment.id}`,
+            includeTrackingLink: false,
+            suppressPendingApproaching: true,
+          });
+        }
+
         await client.query('COMMIT');
+        if (cancelledAppointments.rows.length > 0) this.smsDispatcher.kick();
         await this.audit.record({
           actorId: ctx.userId,
           action: 'session.cancelled',
           targetType: 'consultation_session',
           targetId: id,
-          metadata: { tenantId: ctx.tenantId },
+          metadata: { tenantId: ctx.tenantId, cancelledAppointments: cancelledAppointments.rows.length },
         });
-        return mapSession(updated.rows[0]);
+        return { ...mapSession(updated.rows[0]), cancelledAppointments: cancelledAppointments.rows.length };
       } catch (error) {
         await client.query('ROLLBACK');
         throw error;
@@ -345,7 +389,24 @@ export class SessionsService {
     }
   }
 
-  private assertMinLength(startAt: Date, endAt: Date) {
+  /** Same rule as weekly schedules: every patient's expected consult must fit within the session time. */
+  private assertCapacityFits(startAt: Date, endAt: Date, capacity: number, durationMinutes: number) {
+    const sessionMinutes = Math.round((endAt.getTime() - startAt.getTime()) / 60000);
+    if (durationMinutes > sessionMinutes) {
+      throw new BadRequestException(
+        `Expected consult (${durationMinutes} min) cannot be longer than the session (${sessionMinutes} min)`,
+      );
+    }
+    if (capacity * durationMinutes > sessionMinutes) {
+      const maxCapacity = Math.floor(sessionMinutes / durationMinutes);
+      throw new BadRequestException(
+        `${capacity} patients × ${durationMinutes} min = ${capacity * durationMinutes} min, but the session is only ` +
+          `${sessionMinutes} min. Reduce maximum patients to ${maxCapacity} or less, shorten the consult time, or extend the session.`,
+      );
+    }
+  }
+
+    private assertMinLength(startAt: Date, endAt: Date) {
     const minutes = (endAt.getTime() - startAt.getTime()) / 60000;
     if (minutes < MIN_SESSION_MINUTES) {
       throw new BadRequestException(`Session must be at least ${MIN_SESSION_MINUTES} minutes`);

@@ -12,6 +12,7 @@ import {
   type CreateSessionDefaults,
 } from '../components/CreateSessionDialog';
 import { SessionDetailDialog } from '../components/SessionDetailDialog';
+import { OpenSessionsPanel } from '../components/OpenSessionsPanel';
 import { SessionEmptyState } from '../components/SessionEmptyState';
 import { SessionsCalendarView } from '../components/SessionsCalendarView';
 import { SessionsDataTable, type SessionRow } from '../components/SessionsDataTable';
@@ -187,7 +188,10 @@ export function SessionsPage() {
     let upcomingCount = 0;
     let scheduledCapacity = 0;
     let cancelledCount = 0;
+    let openCount = 0;
     for (const s of summarySource) {
+      // Matches the "Open" status filter: open or paused sessions.
+      if (s.status === 'OPEN' || s.status === 'PAUSED') openCount += 1;
       if (s.status === 'CANCELLED') {
         cancelledCount += 1;
         continue;
@@ -204,6 +208,7 @@ export function SessionsPage() {
       upcomingCount,
       scheduledCapacity,
       cancelledCount,
+      openCount,
       rangeLabel: `Next 90 days from ${today}`,
     };
   }, [summarySource, hasEverLoaded]);
@@ -220,7 +225,15 @@ export function SessionsPage() {
   return (
     <div className="space-y-5">
       <SessionsPageHeader onCreate={() => openCreate()} />
-      <SessionsSummaryCards summary={summary} loading={loading && !hasEverLoaded} />
+      <SessionsSummaryCards
+        summary={summary}
+        loading={loading && !hasEverLoaded}
+        openActive={filters.status === 'OPEN'}
+        onOpenSessionsClick={() => {
+          const today = clinicTodayIso();
+          patch({ status: 'OPEN', from: today, to: addDaysIso(today, 90), view: 'list', q: '' });
+        }}
+      />
 
       <Card className="shadow-none">
         <CardContent className="space-y-4 pt-5">
@@ -262,7 +275,14 @@ export function SessionsPage() {
             />
           ) : null}
 
-          {!loading && !error && filteredRows.length > 0 && filters.view === 'list' ? (
+          {!loading && !error && filteredRows.length > 0 && filters.view === 'list' && filters.status === 'OPEN' ? (
+            <OpenSessionsPanel
+              sessions={filteredRows}
+              onSelectSession={(id) => openSessionDetail(id, false)}
+            />
+          ) : null}
+
+          {!loading && !error && filteredRows.length > 0 && filters.view === 'list' && filters.status !== 'OPEN' ? (
             <SessionsDataTable
               data={filteredRows}
               pageIndex={pageIndex}

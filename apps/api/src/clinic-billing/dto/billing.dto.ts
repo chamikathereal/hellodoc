@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsEmail,
   IsIn,
   IsInt,
   IsOptional,
@@ -23,6 +24,8 @@ const METHODS = ['CASH', 'CARD_EXTERNAL', 'BANK_TRANSFER'] as const;
 
 export class InviteCashierDto {
   @IsString()
+  @IsEmail({}, { message: 'Enter a valid email address' })
+  @MaxLength(254)
   email!: string;
 }
 

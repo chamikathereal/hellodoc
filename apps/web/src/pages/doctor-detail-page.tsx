@@ -12,6 +12,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { DoctorUpcomingSessionsCard } from '@/components/doctor-upcoming-sessions-card';
+import { ScheduleTemplateBulkUpdateDialog } from '@/components/schedule-template-bulk-update-dialog';
+import { ScheduleTemplateDeactivateDialog } from '@/components/schedule-template-deactivate-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -23,7 +26,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { api, ApiError } from '@/lib/api';
-import type { ConsultationSession, Doctor, ScheduleTemplate } from '@/lib/clinic-types';
+import type { Doctor, ScheduleTemplate } from '@/lib/clinic-types';
 import { WEEKDAYS } from '@/lib/clinic-types';
 
 function timeToMinutes(hhmm: string): number {
@@ -66,7 +69,7 @@ export function DoctorDetailPage() {
   const { id } = useParams();
   const [doctor, setDoctor] = useState<Doctor | null>(null);
   const [templates, setTemplates] = useState<ScheduleTemplate[]>([]);
-  const [upcoming, setUpcoming] = useState<ConsultationSession[]>([]);
+  const [sessionsRefreshKey, setSessionsRefreshKey] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [scheduleMsg, setScheduleMsg] = useState<string | null>(null);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
@@ -75,7 +78,11 @@ export function DoctorDetailPage() {
   const [endTime, setEndTime] = useState('21:00');
   const [capacity, setCapacity] = useState(25);
   const [duration, setDuration] = useState(10);
+  const [horizonOption, setHorizonOption] = useState<'30' | '60' | '90' | 'custom'>('90');
+  const [customHorizonDays, setCustomHorizonDays] = useState(90);
   const [saving, setSaving] = useState(false);
+  const [deactivatingTemplate, setDeactivatingTemplate] = useState<ScheduleTemplate | null>(null);
+  const [bulkUpdatingTemplate, setBulkUpdatingTemplate] = useState<ScheduleTemplate | null>(null);
 
   // Doctor login modal state
   const [loginModalOpen, setLoginModalOpen] = useState(false);
@@ -93,16 +100,13 @@ export function DoctorDetailPage() {
     if (!id) return;
     setError(null);
     try {
-      const [d, t, s] = await Promise.all([
+      const [d, t] = await Promise.all([
         api<Doctor>(`/clinic/doctors/${id}`),
         api<ScheduleTemplate[]>(`/clinic/doctors/${id}/schedule-templates`),
-        api<{ items: ConsultationSession[] }>(
-          `/clinic/sessions?doctorId=${id}&status=SCHEDULED&limit=20`,
-        ),
       ]);
       setDoctor(d);
       setTemplates(t);
-      setUpcoming(s.items.filter((x) => new Date(x.startAt).getTime() > Date.now()).slice(0, 10));
+      setSessionsRefreshKey((k) => k + 1);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load doctor');
     }
@@ -128,6 +132,9 @@ export function DoctorDetailPage() {
       setReviewing(false);
     }
   };
+
+  const horizonDays = horizonOption === 'custom' ? customHorizonDays : Number(horizonOption);
+  const horizonValid = Number.isInteger(horizonDays) && horizonDays >= 1 && horizonDays <= 365;
 
   if (error) return <p className="text-sm text-destructive">{error}</p>;
   if (!doctor) return <p className="text-sm text-muted-foreground">Loading…</p>;
@@ -378,7 +385,7 @@ export function DoctorDetailPage() {
         </DialogContent>
       </Dialog>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid items-start gap-4 lg:grid-cols-3">
         <Card>
           <CardHeader><h2 className="font-semibold">Profile</h2></CardHeader>
           <CardContent className="space-y-2 text-sm">
@@ -390,58 +397,16 @@ export function DoctorDetailPage() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader><h2 className="font-semibold">Upcoming sessions</h2></CardHeader>
-          <CardContent>
-            {upcoming.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No upcoming sessions.</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead>Date</TableHead>
-                    <TableHead>Time</TableHead>
-                    <TableHead>Capacity</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {upcoming.map((session) => (
-                    <TableRow key={session.id}>
-                      <TableCell className="font-medium">{session.localDate}</TableCell>
-                      <TableCell>
-                        {new Date(session.startAt).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                        {' – '}
-                        {new Date(session.endAt).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </TableCell>
-                      <TableCell>{session.capacity}</TableCell>
-                      <TableCell>
-                        <Link to={`/sessions/${session.id}`}>
-                          <Button size="sm" variant="outline" type="button">
-                            View
-                          </Button>
-                        </Link>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+        <div className="lg:col-span-2">
+          <DoctorUpcomingSessionsCard doctorId={doctor.id} refreshKey={sessionsRefreshKey} />
+        </div>
       </div>
 
       <Card>
         <CardHeader>
           <h2 className="font-semibold">Manage weekly schedule</h2>
           <p className="text-sm text-slate-600">
-            Save weekdays and generate the next 90 days of consultation sessions.
+            Save weekdays and generate consultation sessions for the period you choose.
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -495,6 +460,38 @@ export function DoctorDetailPage() {
               />
             </div>
           </div>
+          <div className="grid gap-4 sm:grid-cols-4">
+            <div>
+              <Label htmlFor="schedule-horizon">Generate sessions for</Label>
+              <select
+                id="schedule-horizon"
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs focus:outline-hidden focus:ring-1 focus:ring-ring"
+                value={horizonOption}
+                onChange={(e) => setHorizonOption(e.target.value as typeof horizonOption)}
+              >
+                <option value="30">30 days</option>
+                <option value="60">60 days</option>
+                <option value="90">90 days</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+            {horizonOption === 'custom' ? (
+              <div>
+                <Label htmlFor="schedule-horizon-days">Number of days (1–365)</Label>
+                <Input
+                  id="schedule-horizon-days"
+                  type="number"
+                  min={1}
+                  max={365}
+                  step={1}
+                  value={Number.isNaN(customHorizonDays) ? '' : customHorizonDays}
+                  onChange={(e) =>
+                    setCustomHorizonDays(e.target.value === '' ? Number.NaN : Number(e.target.value))
+                  }
+                />
+              </div>
+            ) : null}
+          </div>
           {scheduleError ? <p className="text-sm text-destructive">{scheduleError}</p> : null}
           {scheduleMsg ? <p className="text-sm text-primary">{scheduleMsg}</p> : null}
           <Button
@@ -502,7 +499,9 @@ export function DoctorDetailPage() {
             disabled={saving || selectedDays.length === 0 || doctor.status !== 'ACTIVE'}
             onClick={async () => {
               setScheduleMsg(null);
-              const validationError = validateSchedule(startTime, endTime, capacity, duration);
+              const validationError = horizonValid
+                ? validateSchedule(startTime, endTime, capacity, duration)
+                : 'Generation period must be a whole number of days between 1 and 365';
               setScheduleError(validationError);
               if (validationError) return;
               setSaving(true);
@@ -524,6 +523,7 @@ export function DoctorDetailPage() {
                     expectedDurationMinutes: duration,
                     timezone: 'Asia/Colombo',
                     materialize: true,
+                    horizonDays,
                   },
                 });
                 setScheduleMsg(
@@ -538,7 +538,9 @@ export function DoctorDetailPage() {
               }
             }}
           >
-            {saving ? 'Saving…' : 'Save schedule & generate 90 days'}
+            {saving
+              ? 'Saving…'
+              : `Save schedule & generate ${horizonValid ? horizonDays : '…'} days`}
           </Button>
 
           {templates.length > 0 ? (
@@ -549,6 +551,8 @@ export function DoctorDetailPage() {
                   <TableRow className="hover:bg-transparent">
                     <TableHead>Weekday</TableHead>
                     <TableHead>Time</TableHead>
+                    <TableHead>Capacity</TableHead>
+                    <TableHead>Duration</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Actions</TableHead>
                   </TableRow>
@@ -562,6 +566,8 @@ export function DoctorDetailPage() {
                       <TableCell>
                         {t.localStartTime}–{t.localEndTime}
                       </TableCell>
+                      <TableCell>{t.defaultCapacity}</TableCell>
+                      <TableCell>{t.expectedDurationMinutes} min</TableCell>
                       <TableCell>
                         <Badge tone={t.isActive ? 'active' : 'suspended'}>
                           {t.isActive ? 'ACTIVE' : 'INACTIVE'}
@@ -606,29 +612,22 @@ export function DoctorDetailPage() {
                             </Button>
                             <Button
                               size="sm"
+                              variant="outline"
+                              type="button"
+                              onClick={() => {
+                                setScheduleError(null);
+                                setBulkUpdatingTemplate(t);
+                              }}
+                            >
+                              Bulk update
+                            </Button>
+                            <Button
+                              size="sm"
                               variant="destructive"
                               type="button"
-                              onClick={async () => {
+                              onClick={() => {
                                 setScheduleError(null);
-                                try {
-                                  const result = await api<{
-                                    cancelledSessions: number;
-                                    keptSessionsWithBookings: string[];
-                                  }>(`/clinic/schedule-templates/${t.id}/deactivate`, {
-                                    method: 'POST',
-                                    json: {},
-                                  });
-                                  const kept = result.keptSessionsWithBookings ?? [];
-                                  setScheduleMsg(
-                                    `Template deactivated. Cancelled ${result.cancelledSessions ?? 0} upcoming session(s).` +
-                                      (kept.length
-                                        ? ` ${kept.length} session(s) with existing bookings were kept (${kept.join(', ')}). Review them in Sessions.`
-                                        : ''),
-                                  );
-                                  await load();
-                                } catch (err) {
-                                  setScheduleError(err instanceof ApiError ? err.message : 'Failed to deactivate template');
-                                }
+                                setDeactivatingTemplate(t);
                               }}
                             >
                               Deactivate
@@ -673,6 +672,66 @@ export function DoctorDetailPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      <ScheduleTemplateBulkUpdateDialog
+        template={bulkUpdatingTemplate}
+        onOpenChange={(open) => {
+          if (!open) setBulkUpdatingTemplate(null);
+        }}
+        templateLabel={
+          bulkUpdatingTemplate
+            ? `${WEEKDAYS.find((d) => d.value === bulkUpdatingTemplate.weekday)?.label ?? ''} ${bulkUpdatingTemplate.localStartTime}–${bulkUpdatingTemplate.localEndTime}`
+            : ''
+        }
+        onConfirm={async (newCapacity, newDuration) => {
+          if (!bulkUpdatingTemplate) return;
+          const result = await api<{
+            updatedSessions: number;
+            skipped: Array<{ date: string; reason: string }>;
+          }>(`/clinic/schedule-templates/${bulkUpdatingTemplate.id}/bulk-update`, {
+            method: 'POST',
+            json: { capacity: newCapacity, expectedDurationMinutes: newDuration },
+          });
+          const skipped = result.skipped ?? [];
+          setScheduleMsg(
+            `Updated ${result.updatedSessions} upcoming session(s) to capacity ${newCapacity} and ${newDuration} min.` +
+              (skipped.length
+                ? ` ${skipped.length} session(s) were left unchanged: ${skipped.map((x) => `${x.date} (${x.reason})`).join('; ')}.`
+                : ''),
+          );
+          await load();
+        }}
+      />
+
+      <ScheduleTemplateDeactivateDialog
+        open={deactivatingTemplate !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeactivatingTemplate(null);
+        }}
+        templateLabel={
+          deactivatingTemplate
+            ? `${WEEKDAYS.find((d) => d.value === deactivatingTemplate.weekday)?.label ?? ''} ${deactivatingTemplate.localStartTime}–${deactivatingTemplate.localEndTime}`
+            : ''
+        }
+        onConfirm={async (reason) => {
+          if (!deactivatingTemplate) return;
+          const result = await api<{
+            cancelledSessions: number;
+            keptSessionsWithBookings: string[];
+          }>(`/clinic/schedule-templates/${deactivatingTemplate.id}/deactivate`, {
+            method: 'POST',
+            json: { reason },
+          });
+          const kept = result.keptSessionsWithBookings ?? [];
+          setScheduleMsg(
+            `Template deactivated. Cancelled ${result.cancelledSessions ?? 0} upcoming session(s).` +
+              (kept.length
+                ? ` ${kept.length} session(s) with existing bookings were kept (${kept.join(', ')}). Review them in Sessions.`
+                : ''),
+          );
+          await load();
+        }}
+      />
     </div>
   );
 }

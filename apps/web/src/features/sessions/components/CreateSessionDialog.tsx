@@ -37,16 +37,49 @@ import { notify } from '@/lib/notify';
 import type { ConsultationSession, Doctor } from '@/lib/clinic-types';
 import { formatSessionDuration } from '../utils/session-formatters';
 
-const schema = z.object({
-  doctorId: z.string().uuid('Select a doctor'),
-  localDate: z.string().min(1, 'Date is required'),
-  startTime: z.string().regex(/^\d{2}:\d{2}$/),
-  endTime: z.string().regex(/^\d{2}:\d{2}$/),
-  capacity: z.number().int().min(1).max(500),
-  expectedDurationMinutes: z.number().int().min(1).max(240),
-  location: z.string().max(120).optional(),
-  internalNotes: z.string().max(1000).optional(),
-});
+function hhmmToMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+const schema = z
+  .object({
+    doctorId: z.string().uuid('Select a doctor'),
+    localDate: z.string().min(1, 'Date is required'),
+    startTime: z.string().regex(/^\d{2}:\d{2}$/),
+    endTime: z.string().regex(/^\d{2}:\d{2}$/),
+    capacity: z
+      .number({ error: 'Enter the maximum number of patients' })
+      .int('Maximum patients must be a whole number')
+      .min(1, 'Maximum patients must be at least 1')
+      .max(500, 'Maximum patients cannot be more than 500'),
+    expectedDurationMinutes: z
+      .number({ error: 'Enter the expected consult time in minutes' })
+      .int('Expected consult must be a whole number of minutes')
+      .min(1, 'Expected consult must be at least 1 minute')
+      .max(240, 'Expected consult cannot be more than 240 minutes'),
+    location: z.string().max(120).optional(),
+    internalNotes: z.string().max(1000).optional(),
+  })
+  .superRefine((v, ctx) => {
+    // Mirrors the API rule: every patient's expected consult must fit within the session time.
+    const sessionMinutes = hhmmToMinutes(v.endTime) - hhmmToMinutes(v.startTime);
+    if (sessionMinutes <= 0) return;
+    if (v.expectedDurationMinutes > sessionMinutes) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['expectedDurationMinutes'],
+        message: `Expected consult (${v.expectedDurationMinutes} min) cannot be longer than the session (${sessionMinutes} min)`,
+      });
+    } else if (v.capacity * v.expectedDurationMinutes > sessionMinutes) {
+      const maxCapacity = Math.floor(sessionMinutes / v.expectedDurationMinutes);
+      ctx.addIssue({
+        code: 'custom',
+        path: ['capacity'],
+        message: `${v.capacity} patients × ${v.expectedDurationMinutes} min = ${v.capacity * v.expectedDurationMinutes} min, but the session is only ${sessionMinutes} min. Use ${maxCapacity} or fewer patients.`,
+      });
+    }
+  });
 
 type FormValues = z.infer<typeof schema>;
 
@@ -234,16 +267,32 @@ export function CreateSessionDialog({
             <Input
               id="create-session-capacity"
               type="number"
+              min={1}
+              max={500}
+              step={1}
+              aria-invalid={Boolean(form.formState.errors.capacity)}
               {...form.register('capacity', { valueAsNumber: true })}
             />
+            {form.formState.errors.capacity ? (
+              <p className="text-xs text-destructive">{form.formState.errors.capacity.message}</p>
+            ) : null}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="create-session-duration">Expected consult (min)</Label>
             <Input
               id="create-session-duration"
               type="number"
+              min={1}
+              max={240}
+              step={1}
+              aria-invalid={Boolean(form.formState.errors.expectedDurationMinutes)}
               {...form.register('expectedDurationMinutes', { valueAsNumber: true })}
             />
+            {form.formState.errors.expectedDurationMinutes ? (
+              <p className="text-xs text-destructive">
+                {form.formState.errors.expectedDurationMinutes.message}
+              </p>
+            ) : null}
           </div>
         </div>
       </section>

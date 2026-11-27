@@ -4,6 +4,7 @@ import {
   Bell,
   CalendarCheck2,
   CalendarClock,
+  CalendarDays,
   ChevronRight,
   ChevronsUpDown,
   HeartPulse,
@@ -61,6 +62,7 @@ const managerNav = [
 
 const doctorNav = [
   { title: 'Worklist', to: '/doctor/worklist', icon: Stethoscope, enabled: true },
+  { title: 'Calendar', to: '/doctor/calendar', icon: CalendarDays, enabled: true },
 ] as const;
 
 const receptionistNav = [

@@ -45,8 +45,8 @@ export function SessionCancelDialog({
         <DialogHeader>
           <DialogTitle>Cancel consultation session</DialogTitle>
           <DialogDescription>
-            Cancel the session for {doctorName}. This cannot be undone. Patient bookings are not
-            part of this milestone.
+            Cancel the session for {doctorName}. This cannot be undone. All confirmed appointments in
+            this session will be cancelled and the patients will be notified by SMS.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">

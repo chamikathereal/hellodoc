@@ -4,6 +4,7 @@ import {
   AppointmentBookingDialog,
   type AppointmentBookingDefaults,
 } from '@/components/appointment-booking-dialog';
+import { AppointmentSessionPicker } from '@/components/appointment-session-picker';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
@@ -20,8 +21,9 @@ import {
 import { TablePagination } from '@/components/ui/table-pagination';
 import { clinicTodayIso } from '@/features/sessions/utils/session-formatters';
 import { api, ApiError } from '@/lib/api';
-import type { Appointment, Doctor } from '@/lib/clinic-types';
+import type { Appointment, ConsultationSession, Doctor } from '@/lib/clinic-types';
 import { appointmentDisplayStatus } from '@/lib/clinic-types';
+import { formatClinicDateTime, formatClinicTime } from '@/lib/visit-timings';
 
 function formatTimeRange(startAt: string | null, endAt: string | null) {
   if (!startAt || !endAt) return '—';
@@ -53,6 +55,28 @@ export function AppointmentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [bookOpen, setBookOpen] = useState(false);
   const [bookDefaults, setBookDefaults] = useState<AppointmentBookingDefaults>({});
+  // With a doctor selected, appointments are shown one consultation session at a time.
+  const [selectedSession, setSelectedSession] = useState<ConsultationSession | null>(null);
+  const [sessionsRefreshKey, setSessionsRefreshKey] = useState(0);
+  const sessionMode = Boolean(applied.doctorId);
+  // Actual open/close times of the selected session (from the session detail API).
+  const [sessionTimes, setSessionTimes] = useState<{ openedAt: string | null; closedAt: string | null } | null>(null);
+
+  useEffect(() => {
+    setSessionTimes(null);
+    if (!selectedSession) return;
+    let cancelled = false;
+    api<ConsultationSession>(`/clinic/sessions/${selectedSession.id}`, { toast: false })
+      .then((s) => {
+        if (!cancelled) setSessionTimes({ openedAt: s.openedAt ?? null, closedAt: s.closedAt ?? null });
+      })
+      .catch(() => {
+        if (!cancelled) setSessionTimes(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSession]);
 
   const openBook = useCallback((defaults: AppointmentBookingDefaults = {}) => {
     setBookDefaults(defaults);
@@ -85,6 +109,13 @@ export function AppointmentsPage() {
   }, [searchParams, openBook]);
 
   const load = useCallback(async () => {
+    if (applied.doctorId && !selectedSession) {
+      setItems([]);
+      setTotal(0);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -92,10 +123,13 @@ export function AppointmentsPage() {
         limit: String(limit),
         offset: String(offset),
         status: applied.status,
-        from: applied.from,
-        to: applied.to,
       });
-      if (applied.doctorId) params.set('doctorId', applied.doctorId);
+      if (applied.doctorId && selectedSession) {
+        params.set('sessionId', selectedSession.id);
+      } else {
+        params.set('from', applied.from);
+        params.set('to', applied.to);
+      }
       if (applied.q.trim()) params.set('q', applied.q.trim());
       const data = await api<{ items: Appointment[]; total: number }>(
         `/clinic/appointments?${params}`,
@@ -107,7 +141,7 @@ export function AppointmentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [applied, offset]);
+  }, [applied, offset, selectedSession]);
 
   useEffect(() => {
     void load();
@@ -138,11 +172,23 @@ export function AppointmentsPage() {
         <CardHeader className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end">
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">From</label>
-            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+            <Input
+              type="date"
+              value={from}
+              disabled={Boolean(doctorId)}
+              title={doctorId ? 'With a doctor selected, pick a session below instead' : undefined}
+              onChange={(e) => setFrom(e.target.value)}
+            />
           </div>
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">To</label>
-            <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+            <Input
+              type="date"
+              value={to}
+              disabled={Boolean(doctorId)}
+              title={doctorId ? 'With a doctor selected, pick a session below instead' : undefined}
+              onChange={(e) => setTo(e.target.value)}
+            />
           </div>
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">Doctor</label>
@@ -182,6 +228,7 @@ export function AppointmentsPage() {
             type="button"
             onClick={() => {
               setOffset(0);
+              if (doctorId !== applied.doctorId) setSelectedSession(null);
               setApplied({ from, to, doctorId, status, q });
             }}
           >
@@ -197,14 +244,62 @@ export function AppointmentsPage() {
               setStatus('CONFIRMED');
               setQ('');
               setOffset(0);
+              setSelectedSession(null);
               setApplied({ from: today, to: today, doctorId: '', status: 'CONFIRMED', q: '' });
             }}
           >
             Reset
           </Button>
         </CardHeader>
-        <CardContent>
-          {loading ? (
+        <CardContent className="space-y-4">
+          {sessionMode ? (
+            <AppointmentSessionPicker
+              doctorId={applied.doctorId}
+              selectedSessionId={selectedSession?.id ?? ''}
+              refreshKey={sessionsRefreshKey}
+              onSelect={(session) => {
+                setOffset(0);
+                setSelectedSession(session);
+              }}
+            />
+          ) : null}
+          {sessionMode && selectedSession ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+              <div>
+                <span className="font-semibold text-foreground">
+                  {selectedSession.doctorDisplayName ?? 'Doctor'} · {selectedSession.localDate}
+                </span>
+                <span className="text-muted-foreground">
+                  {' '}
+                  · {formatTimeRange(selectedSession.startAt, selectedSession.endAt)} · Capacity{' '}
+                  {selectedSession.capacity}
+                </span>
+                <div className="text-xs text-muted-foreground">
+                  Actually opened: {formatClinicDateTime(sessionTimes?.openedAt, selectedSession.timezone)}
+                  {' · '}
+                  Actually closed: {formatClinicDateTime(sessionTimes?.closedAt, selectedSession.timezone)}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {selectedSession.status === 'SCHEDULED' || selectedSession.status === 'OPEN' ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      openBook({ doctorId: selectedSession.doctorId, sessionId: selectedSession.id })
+                    }
+                  >
+                    Book into this session
+                  </Button>
+                ) : null}
+                <Button asChild type="button" size="sm" variant="secondary">
+                  <Link to={`/sessions/${selectedSession.id}/queue`}>Queue Board</Link>
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          {sessionMode && !selectedSession ? null : loading ? (
             <div className="space-y-2">
               <Skeleton className="h-10 w-full" />
               <Skeleton className="h-10 w-full" />
@@ -218,7 +313,7 @@ export function AppointmentsPage() {
               </Button>
             </div>
           ) : null}
-          {!loading && !error && items.length === 0 ? (
+          {!loading && !error && items.length === 0 && !(sessionMode && !selectedSession) ? (
             <div className="py-10 text-center">
               <p className="text-sm text-muted-foreground">No appointments found for these filters.</p>
               <Button
@@ -238,9 +333,20 @@ export function AppointmentsPage() {
                   <TableRow className="hover:bg-transparent">
                     <TableHead>Queue</TableHead>
                     <TableHead>Patient</TableHead>
-                    <TableHead>Doctor</TableHead>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Session</TableHead>
+                    {sessionMode ? null : (
+                      <>
+                        <TableHead>Doctor</TableHead>
+                        <TableHead>Date</TableHead>
+                        <TableHead>Session</TableHead>
+                      </>
+                    )}
+                    {sessionMode ? (
+                      <>
+                        <TableHead>Checked in</TableHead>
+                        <TableHead>Consult start</TableHead>
+                        <TableHead>Consult end</TableHead>
+                      </>
+                    ) : null}
                     <TableHead>Source</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Actions</TableHead>
@@ -256,11 +362,26 @@ export function AppointmentsPage() {
                         <div className="font-medium text-foreground">{item.patientFullName}</div>
                         <div className="font-mono text-xs text-muted-foreground">{item.patientNumber}</div>
                       </TableCell>
-                      <TableCell>{item.doctorDisplayName ?? '—'}</TableCell>
-                      <TableCell>{item.localDate ?? '—'}</TableCell>
-                      <TableCell className="text-sm">
-                        {formatTimeRange(item.startAt, item.endAt)}
-                      </TableCell>
+                      {sessionMode ? null : (
+                        <>
+                          <TableCell>{item.doctorDisplayName ?? '—'}</TableCell>
+                          <TableCell>{item.localDate ?? '—'}</TableCell>
+                          <TableCell className="text-sm">
+                            {formatTimeRange(item.startAt, item.endAt)}
+                          </TableCell>
+                        </>
+                      )}
+                      {sessionMode ? (
+                        <>
+                          <TableCell className="text-sm">{formatClinicTime(item.checkedInAt, item.timezone ?? undefined)}</TableCell>
+                          <TableCell className="text-sm">
+                            {formatClinicTime(item.consultationStartedAt, item.timezone ?? undefined)}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {formatClinicTime(item.consultationEndedAt, item.timezone ?? undefined)}
+                          </TableCell>
+                        </>
+                      ) : null}
                       <TableCell>{item.bookingSource}</TableCell>
                       <TableCell>
                         <Badge
@@ -307,7 +428,10 @@ export function AppointmentsPage() {
         open={bookOpen}
         onOpenChange={closeBook}
         defaults={bookDefaults}
-        onBooked={() => void load()}
+        onBooked={() => {
+          void load();
+          setSessionsRefreshKey((k) => k + 1);
+        }}
       />
     </div>
   );

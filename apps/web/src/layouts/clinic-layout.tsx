@@ -62,7 +62,8 @@ export function ClinicLayout({ title }: { title?: string }) {
   return (
     <SidebarProvider>
       <AppSidebar clinicName={clinicName} />
-      <SidebarInset>
+      {/* min-w-0: wide tables scroll inside their own container instead of widening the page on tablets. */}
+      <SidebarInset className="min-w-0">
         <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80">
           <SidebarTrigger className="-ml-1" />
           <Separator orientation="vertical" className="mr-1 h-4" />

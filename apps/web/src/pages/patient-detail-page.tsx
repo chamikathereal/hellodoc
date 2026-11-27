@@ -109,7 +109,14 @@ type EncounterRow = {
     temperature_c: string | number | null;
     recorded_at: string;
   } | null;
-  prescription: { id: string; status: string; version: number } | null;
+  prescription: {
+    id: string;
+    status: string;
+    version: number;
+    /** Present only for a signed prescription. */
+    clinical_instructions?: string | null;
+    items?: Array<{ medicine_name: string; dose: string; frequency: string; instructions: string | null }>;
+  } | null;
 };
 
 type ClinicalHistory = {
@@ -209,18 +216,24 @@ export function PatientDetailPage() {
     if (!id) return;
     setError(null);
     try {
+      // Doctors only see clinical information, so the administrative data is not loaded for them.
+      const none = { items: [] };
       const [p, a, messages, appts, relatedPatients] = await Promise.all([
         api<Patient>(`/clinic/patients/${id}`),
-        api<{ items: AuditItem[] }>(`/clinic/patients/${id}/audit`, { toast: false }).catch(() => ({ items: [] })),
-        api<{ items: SmsRow[] }>(`/clinic/patients/${id}/notifications`, { toast: false }).catch(() => ({
-          items: [],
-        })),
-        api<{ items: AppointmentRow[] }>(`/clinic/appointments?patientId=${id}&limit=50`, { toast: false }).catch(
-          () => ({ items: [] }),
-        ),
-        api<{ items: RelatedPatient[] }>(`/clinic/patients/${id}/related`, { toast: false }).catch(() => ({
-          items: [],
-        })),
+        isDoctor
+          ? { items: [] as AuditItem[] }
+          : api<{ items: AuditItem[] }>(`/clinic/patients/${id}/audit`, { toast: false }).catch(() => none),
+        isDoctor
+          ? { items: [] as SmsRow[] }
+          : api<{ items: SmsRow[] }>(`/clinic/patients/${id}/notifications`, { toast: false }).catch(() => none),
+        isDoctor
+          ? { items: [] as AppointmentRow[] }
+          : api<{ items: AppointmentRow[] }>(`/clinic/appointments?patientId=${id}&limit=50`, { toast: false }).catch(
+              () => none,
+            ),
+        isDoctor
+          ? { items: [] as RelatedPatient[] }
+          : api<{ items: RelatedPatient[] }>(`/clinic/patients/${id}/related`, { toast: false }).catch(() => none),
       ]);
       setPatient(p);
       setAudit(a.items);
@@ -228,7 +241,7 @@ export function PatientDetailPage() {
       setAppointments(appts.items);
       setRelated(relatedPatients.items);
 
-      if (p.patientNumber) {
+      if (p.patientNumber && !isDoctor) {
         void api<{ items: InvoiceRow[] }>(`/clinic/invoices?q=${encodeURIComponent(p.patientNumber)}&limit=50`, {
           toast: false,
         })
@@ -421,21 +434,28 @@ export function PatientDetailPage() {
           <TabsTrigger value="overview" className="gap-1.5 text-xs sm:text-sm">
             <User className="size-3.5" /> Overview
           </TabsTrigger>
-          <TabsTrigger value="visits" className="gap-1.5 text-xs sm:text-sm">
-            <Calendar className="size-3.5" /> Visits ({appointments.length})
-          </TabsTrigger>
+          {/* Doctors see clinical information only; visits, billing, SMS and audit stay with clinic staff. */}
+          {!isDoctor ? (
+            <TabsTrigger value="visits" className="gap-1.5 text-xs sm:text-sm">
+              <Calendar className="size-3.5" /> Visits ({appointments.length})
+            </TabsTrigger>
+          ) : null}
           <TabsTrigger value="medical" className="gap-1.5 text-xs sm:text-sm">
             <Stethoscope className="size-3.5" /> Medical History
           </TabsTrigger>
-          <TabsTrigger value="billing" className="gap-1.5 text-xs sm:text-sm">
-            <Receipt className="size-3.5" /> Invoices ({invoices.length})
-          </TabsTrigger>
-          <TabsTrigger value="sms" className="gap-1.5 text-xs sm:text-sm">
-            <MessageSquare className="size-3.5" /> SMS Logs ({sms.length})
-          </TabsTrigger>
-          <TabsTrigger value="audit" className="gap-1.5 text-xs sm:text-sm">
-            <Shield className="size-3.5" /> Audit Trail
-          </TabsTrigger>
+          {!isDoctor ? (
+            <>
+              <TabsTrigger value="billing" className="gap-1.5 text-xs sm:text-sm">
+                <Receipt className="size-3.5" /> Invoices ({invoices.length})
+              </TabsTrigger>
+              <TabsTrigger value="sms" className="gap-1.5 text-xs sm:text-sm">
+                <MessageSquare className="size-3.5" /> SMS Logs ({sms.length})
+              </TabsTrigger>
+              <TabsTrigger value="audit" className="gap-1.5 text-xs sm:text-sm">
+                <Shield className="size-3.5" /> Audit Trail
+              </TabsTrigger>
+            </>
+          ) : null}
         </TabsList>
 
         {/* TAB 1: OVERVIEW */}
@@ -528,100 +548,104 @@ export function PatientDetailPage() {
             </Card>
           </div>
 
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                    <Users className="size-4" />
-                  </div>
-                  <div>
-                    <CardTitle className="text-base">Related patients</CardTitle>
-                    <CardDescription>
-                      Other patient records linked by the same phone number or guardian contact.
-                    </CardDescription>
-                  </div>
-                </div>
-                <Badge tone={related.length > 0 ? 'pending' : 'default'}>
-                  {related.length} linked
-                </Badge>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {related.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-border bg-muted/20 px-4 py-6 text-center">
-                  <Link2 className="mx-auto size-5 text-muted-foreground" />
-                  <p className="mt-2 text-sm font-medium text-foreground">No shared-contact relationships</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    When another patient uses the same mobile or guardian number, they will appear here.
-                  </p>
-                </div>
-              ) : (
-                <div className="grid gap-3 md:grid-cols-2">
-                  {related.map((item) => (
-                    <Link
-                      key={`${item.id}-${item.sharedContact.normalizedValue}`}
-                      to={`/patients/${item.id}`}
-                      className="rounded-xl border border-border bg-card p-4 transition-colors hover:border-primary/40 hover:bg-muted/30"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate font-semibold text-foreground">
-                            {item.preferredName || item.fullName}
-                          </p>
-                          <p className="font-mono text-[11px] text-muted-foreground">
-                            {item.patientNumber}
-                          </p>
-                        </div>
-                        <Badge tone={statusTone(item.status)}>{item.status}</Badge>
+          {!isDoctor ? (
+            <>
+              <Card>
+                <CardHeader className="pb-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                        <Users className="size-4" />
                       </div>
-                      <div className="mt-3 space-y-1.5 text-xs">
-                        <p className="font-medium text-primary">{item.relationshipLabel}</p>
-                        <p className="text-muted-foreground">
-                          Shared {item.sharedContact.contactType.toLowerCase()}:{' '}
-                          <span className="font-mono text-foreground">
-                            {item.sharedContact.displayValue}
-                          </span>
-                        </p>
-                        {item.contactPersonName ? (
-                          <p className="text-muted-foreground">Contact person: {item.contactPersonName}</p>
-                        ) : null}
-                        <p className="text-muted-foreground">
-                          Age:{' '}
-                          {displayPatientAge({
-                            dateOfBirth: item.dateOfBirth,
-                            approximateAgeYears: item.approximateAgeYears,
-                            ageRecordedOn: null,
-                          })}
-                        </p>
+                      <div>
+                        <CardTitle className="text-base">Related patients</CardTitle>
+                        <CardDescription>
+                          Other patient records linked by the same phone number or guardian contact.
+                        </CardDescription>
                       </div>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                    </div>
+                    <Badge tone={related.length > 0 ? 'pending' : 'default'}>
+                      {related.length} linked
+                    </Badge>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {related.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-border bg-muted/20 px-4 py-6 text-center">
+                      <Link2 className="mx-auto size-5 text-muted-foreground" />
+                      <p className="mt-2 text-sm font-medium text-foreground">No shared-contact relationships</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        When another patient uses the same mobile or guardian number, they will appear here.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {related.map((item) => (
+                        <Link
+                          key={`${item.id}-${item.sharedContact.normalizedValue}`}
+                          to={`/patients/${item.id}`}
+                          className="rounded-xl border border-border bg-card p-4 transition-colors hover:border-primary/40 hover:bg-muted/30"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="truncate font-semibold text-foreground">
+                                {item.preferredName || item.fullName}
+                              </p>
+                              <p className="font-mono text-[11px] text-muted-foreground">
+                                {item.patientNumber}
+                              </p>
+                            </div>
+                            <Badge tone={statusTone(item.status)}>{item.status}</Badge>
+                          </div>
+                          <div className="mt-3 space-y-1.5 text-xs">
+                            <p className="font-medium text-primary">{item.relationshipLabel}</p>
+                            <p className="text-muted-foreground">
+                              Shared {item.sharedContact.contactType.toLowerCase()}:{' '}
+                              <span className="font-mono text-foreground">
+                                {item.sharedContact.displayValue}
+                              </span>
+                            </p>
+                            {item.contactPersonName ? (
+                              <p className="text-muted-foreground">Contact person: {item.contactPersonName}</p>
+                            ) : null}
+                            <p className="text-muted-foreground">
+                              Age:{' '}
+                              {displayPatientAge({
+                                dateOfBirth: item.dateOfBirth,
+                                approximateAgeYears: item.approximateAgeYears,
+                                ageRecordedOn: null,
+                              })}
+                            </p>
+                          </div>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
 
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Administrative details</CardTitle>
-              <CardDescription>Registry timestamps and record status.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <dl className="grid gap-x-6 sm:grid-cols-2">
-                <DetailRow label="Registered on" value={formatRegisteredDate(patient.createdAt)} />
-                <DetailRow label="Last updated" value={formatRegisteredDate(patient.updatedAt)} />
-                {patient.deactivationReason ? (
-                  <div className="sm:col-span-2">
-                    <DetailRow
-                      label="Deactivation"
-                      value={<span className="text-destructive">{patient.deactivationReason}</span>}
-                    />
-                  </div>
-                ) : null}
-              </dl>
-            </CardContent>
-          </Card>
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base">Administrative details</CardTitle>
+                  <CardDescription>Registry timestamps and record status.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <dl className="grid gap-x-6 sm:grid-cols-2">
+                    <DetailRow label="Registered on" value={formatRegisteredDate(patient.createdAt)} />
+                    <DetailRow label="Last updated" value={formatRegisteredDate(patient.updatedAt)} />
+                    {patient.deactivationReason ? (
+                      <div className="sm:col-span-2">
+                        <DetailRow
+                          label="Deactivation"
+                          value={<span className="text-destructive">{patient.deactivationReason}</span>}
+                        />
+                      </div>
+                    ) : null}
+                  </dl>
+                </CardContent>
+              </Card>
+            </>
+          ) : null}
         </TabsContent>
 
         {/* TAB 2: VISITS & APPOINTMENTS */}
@@ -841,6 +865,33 @@ export function PatientDetailPage() {
                                   !encounter.treatment_plan &&
                                   !encounter.follow_up_instructions ? (
                                     <p className="text-sm text-muted-foreground">No clinical notes were recorded for this visit.</p>
+                                  ) : null}
+
+                                  {encounter.prescription?.status === 'SIGNED' && encounter.prescription.items?.length ? (
+                                    <div className="rounded-lg border border-border bg-background px-3 py-2">
+                                      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                                        Prescription
+                                      </p>
+                                      <div className="mt-1.5 divide-y divide-border">
+                                        {encounter.prescription.items.map((item, itemIndex) => (
+                                          <div
+                                            key={`${item.medicine_name}-${itemIndex}`}
+                                            className="grid gap-1 py-1.5 text-sm sm:grid-cols-4"
+                                          >
+                                            <p className="font-medium text-foreground">{item.medicine_name}</p>
+                                            <p className="text-muted-foreground">{item.dose}</p>
+                                            <p className="text-muted-foreground">{item.frequency}</p>
+                                            <p className="text-muted-foreground">{item.instructions || '—'}</p>
+                                          </div>
+                                        ))}
+                                      </div>
+                                      {encounter.prescription.clinical_instructions ? (
+                                        <p className="mt-1.5 whitespace-pre-wrap text-sm text-muted-foreground">
+                                          <span className="font-medium text-foreground">Additional notes:</span>{' '}
+                                          {encounter.prescription.clinical_instructions}
+                                        </p>
+                                      ) : null}
+                                    </div>
                                   ) : null}
 
                                   <div className="flex flex-wrap gap-2 pt-1">

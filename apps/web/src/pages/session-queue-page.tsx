@@ -360,7 +360,7 @@ export function SessionQueuePage() {
                           )
                         }
                       >
-                        Start turn
+                        Start consultation
                       </Button>
                       <Button
                         size="sm"
@@ -388,7 +388,7 @@ export function SessionQueuePage() {
                         )
                       }
                     >
-                      Finish turn
+                      Complete consultation
                     </Button>
                   )
                 }
@@ -399,7 +399,7 @@ export function SessionQueuePage() {
 
         <Card>
           <CardHeader>
-            <h2 className="font-semibold">Reserved / Held / Skipped</h2>
+            <h2 className="font-semibold">Booked (not checked in) / Held / Skipped</h2>
           </CardHeader>
           <CardContent className="space-y-2">
             {[...board.reserved, ...board.held, ...board.skipped].map((entry) => (

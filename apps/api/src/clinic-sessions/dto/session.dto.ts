@@ -27,16 +27,16 @@ export class CreateSessionDto {
 
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  @Max(500)
+  @IsInt({ message: 'Maximum patients must be a whole number' })
+  @Min(1, { message: 'Maximum patients must be at least 1' })
+  @Max(500, { message: 'Maximum patients cannot be more than 500' })
   capacity?: number;
 
   @IsOptional()
   @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  @Max(240)
+  @IsInt({ message: 'Expected consult must be a whole number of minutes' })
+  @Min(1, { message: 'Expected consult must be at least 1 minute' })
+  @Max(240, { message: 'Expected consult cannot be more than 240 minutes' })
   expectedDurationMinutes?: number;
 
   @IsOptional()

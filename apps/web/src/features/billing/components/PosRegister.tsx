@@ -68,6 +68,32 @@ type Prescription = {
   items: PrescriptionItem[];
 };
 
+/** An appointment whose prescription is signed and that has not been billed yet. */
+type BillableAppointment = {
+  appointmentId: string;
+  bookingReference: string;
+  queueDisplay: string;
+  patientId: string;
+  patientName: string;
+  patientNumber: string;
+  doctorName: string;
+  localDate: string;
+  startAt: string;
+  endAt: string;
+  signedAt: string | null;
+  medicines: Array<{ medicine_name: string; dose: string | null; frequency: string | null }>;
+};
+
+function billableLabel(a: BillableAppointment): string {
+  const time = new Date(a.startAt).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Colombo',
+  });
+  return `${a.bookingReference} · ${a.patientName} (${a.patientNumber}) · ${a.doctorName} · ${a.localDate} ${time} · Queue ${a.queueDisplay}`;
+}
+
 export type CartItem = {
   clientId: string;
   serviceId: string;
@@ -143,6 +169,42 @@ export function PosRegister({
   const [patientSearch, setPatientSearch] = useState('');
   const [appointmentId, setAppointmentId] = useState('');
   const [rx, setRx] = useState<Prescription | null>(null);
+  const [billable, setBillable] = useState<BillableAppointment[]>([]);
+  const [appointmentSearch, setAppointmentSearch] = useState('');
+
+  // Signed-prescription appointments waiting for billing (the cashier bills them here).
+  const loadBillable = () => {
+    void api<{ items: BillableAppointment[] }>('/clinic/billing/billable-appointments', { toast: false })
+      .then((data) => setBillable(data.items ?? []))
+      .catch(() => setBillable([]));
+  };
+  useEffect(() => {
+    loadBillable();
+  }, []);
+
+  const selectedAppointment = useMemo(
+    () => billable.find((a) => a.appointmentId === appointmentId) ?? null,
+    [billable, appointmentId],
+  );
+  const filteredBillable = useMemo(() => {
+    const q = appointmentSearch.trim().toLowerCase();
+    if (!q) return billable;
+    return billable.filter((a) => billableLabel(a).toLowerCase().includes(q));
+  }, [billable, appointmentSearch]);
+
+  const handleSelectAppointment = (id: string) => {
+    setError(null);
+    setAppointmentId(id);
+    const appt = billable.find((a) => a.appointmentId === id);
+    if (!appt) return;
+    // The invoice must be for the appointment's patient, so select them too.
+    setPatients((prev) =>
+      prev.some((p) => p.id === appt.patientId)
+        ? prev
+        : [{ id: appt.patientId, fullName: appt.patientName, patientNumber: appt.patientNumber }, ...prev],
+    );
+    setPatientId(appt.patientId);
+  };
 
   // Cart
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -419,6 +481,7 @@ export function PosRegister({
       });
 
       onInvoiceCreated?.();
+      loadBillable();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to process POS checkout');
     } finally {
@@ -459,6 +522,7 @@ export function PosRegister({
       });
 
       onInvoiceCreated?.();
+      loadBillable();
       onSwitchToInvoices?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to save draft invoice');
@@ -471,6 +535,7 @@ export function PosRegister({
     setCompletedSale(null);
     setPatientId('');
     setAppointmentId('');
+    setAppointmentSearch('');
     setRx(null);
     setTenderedInput('');
     loadStandardVisit();
@@ -522,7 +587,13 @@ export function PosRegister({
                 <select
                   className="h-8 w-full rounded-md border border-input bg-background px-3 text-xs focus:ring-1 focus:ring-primary"
                   value={patientId}
-                  onChange={(e) => setPatientId(e.target.value)}
+                  onChange={(e) => {
+                    setPatientId(e.target.value);
+                    // An appointment belongs to one patient; picking someone else unlinks it.
+                    if (selectedAppointment && selectedAppointment.patientId !== e.target.value) {
+                      setAppointmentId('');
+                    }
+                  }}
                 >
                   <option value="">-- Choose Patient ({filteredPatients.length} shown) --</option>
                   {filteredPatients.map((p) => (
@@ -533,15 +604,43 @@ export function PosRegister({
                 </select>
               </div>
 
-              {/* Appointment ID / Link */}
-              <div>
-                <Label className="text-xs text-muted-foreground">Appointment UUID (Optional)</Label>
+              {/* Appointment with a signed prescription, waiting for billing */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs text-muted-foreground">Appointment (Optional)</Label>
+                  <button
+                    type="button"
+                    onClick={loadBillable}
+                    className="text-[10px] text-muted-foreground hover:underline"
+                  >
+                    Refresh list
+                  </button>
+                </div>
                 <Input
-                  placeholder="Paste appointment UUID"
-                  value={appointmentId}
-                  onChange={(e) => setAppointmentId(e.target.value)}
-                  className="mt-1 h-9 text-xs"
+                  placeholder="Filter by ref, patient, doctor or date..."
+                  value={appointmentSearch}
+                  onChange={(e) => setAppointmentSearch(e.target.value)}
+                  className="h-7 text-xs mb-1"
                 />
+                <select
+                  className="h-8 w-full rounded-md border border-input bg-background px-3 text-xs focus:ring-1 focus:ring-primary"
+                  value={appointmentId}
+                  onChange={(e) => handleSelectAppointment(e.target.value)}
+                >
+                  <option value="">
+                    {billable.length
+                      ? `-- No appointment (${filteredBillable.length} ready for billing) --`
+                      : '-- No signed prescriptions waiting for billing --'}
+                  </option>
+                  {selectedAppointment && !filteredBillable.includes(selectedAppointment) ? (
+                    <option value={selectedAppointment.appointmentId}>{billableLabel(selectedAppointment)}</option>
+                  ) : null}
+                  {filteredBillable.map((a) => (
+                    <option key={a.appointmentId} value={a.appointmentId}>
+                      {billableLabel(a)}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
 
@@ -551,7 +650,10 @@ export function PosRegister({
                 <div className="flex items-center gap-2">
                   <Pill className="size-4 text-teal-600 dark:text-teal-400" />
                   <span>
-                    <strong className="font-semibold">{rx.items.length} Doctor Prescribed Medicines</strong> detected for this visit.
+                    <strong className="font-semibold">{rx.items.length} Doctor Prescribed Medicines</strong> detected for this visit:{' '}
+                    {rx.items
+                      .map((item) => [item.medicine_name, item.dose, item.frequency].filter(Boolean).join(' '))
+                      .join(', ')}
                   </span>
                 </div>
                 <Button

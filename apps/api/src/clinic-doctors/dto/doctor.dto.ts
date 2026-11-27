@@ -12,6 +12,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { IsSriLankanMobile } from '../../common/sri-lanka-mobile.js';
 
 export class CreateDoctorDto {
   @IsString()
@@ -32,7 +33,7 @@ export class CreateDoctorDto {
 
   @IsOptional()
   @IsString()
-  @Matches(/^[0-9+\-\s()]{7,20}$/, { message: 'Invalid contact number' })
+  @IsSriLankanMobile()
   contactNumber?: string;
 
   @IsOptional()
@@ -64,7 +65,7 @@ export class UpdateDoctorDto {
 
   @IsOptional()
   @IsString()
-  @Matches(/^[0-9+\-\s()]{7,20}$/, { message: 'Invalid contact number' })
+  @IsSriLankanMobile()
   contactNumber?: string;
 
   @IsOptional()

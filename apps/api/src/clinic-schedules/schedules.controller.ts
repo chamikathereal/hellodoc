@@ -2,7 +2,12 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/commo
 import { CurrentSession, Roles } from '../auth/decorators.js';
 import type { AuthenticatedSession } from '../auth/session.service.js';
 import { ClinicContextService } from '../clinic-context/clinic-context.service.js';
-import { CreateScheduleTemplatesDto, MaterializeScheduleDto } from './dto/schedule.dto.js';
+import {
+  BulkUpdateTemplateSessionsDto,
+  CreateScheduleTemplatesDto,
+  DeactivateScheduleTemplateDto,
+  MaterializeScheduleDto,
+} from './dto/schedule.dto.js';
 import { SchedulesService } from './schedules.service.js';
 
 @Controller('clinic')
@@ -38,9 +43,10 @@ export class SchedulesController {
   async deactivate(
     @CurrentSession() session: AuthenticatedSession,
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: DeactivateScheduleTemplateDto,
   ) {
     const ctx = await this.clinicContext.resolve(session);
-    return this.schedules.deactivate(ctx, id);
+    return this.schedules.deactivate(ctx, id, dto);
   }
 
   @Roles('clinic_manager')
@@ -51,6 +57,17 @@ export class SchedulesController {
   ) {
     const ctx = await this.clinicContext.resolve(session);
     return this.schedules.activate(ctx, id);
+  }
+
+  @Roles('clinic_manager')
+  @Post('schedule-templates/:id/bulk-update')
+  async bulkUpdateSessions(
+    @CurrentSession() session: AuthenticatedSession,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: BulkUpdateTemplateSessionsDto,
+  ) {
+    const ctx = await this.clinicContext.resolve(session);
+    return this.schedules.bulkUpdateSessions(ctx, id, dto);
   }
 
   @Roles('clinic_manager')

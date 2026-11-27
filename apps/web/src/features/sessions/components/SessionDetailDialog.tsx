@@ -30,6 +30,7 @@ import {
 import { canModifySession } from '../utils/session-status';
 import { api, ApiError } from '@/lib/api';
 import type { ConsultationSession } from '@/lib/clinic-types';
+import { formatClinicDateTime } from '@/lib/visit-timings';
 
 export function SessionDetailDialog({
   open,
@@ -323,6 +324,18 @@ export function SessionDetailDialog({
                     <div>
                       <span className="text-xs text-muted-foreground">Internal Notes</span>
                       <p className="mt-0.5 font-medium">{session.internalNotes ?? '—'}</p>
+                    </div>
+                    <div>
+                      <span className="text-xs text-muted-foreground">Actually opened</span>
+                      <p className="mt-0.5 font-medium">
+                        {formatClinicDateTime(session.openedAt, session.timezone)}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-xs text-muted-foreground">Actually closed</span>
+                      <p className="mt-0.5 font-medium">
+                        {formatClinicDateTime(session.closedAt, session.timezone)}
+                      </p>
                     </div>
                   </div>
 

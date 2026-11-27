@@ -71,6 +71,9 @@ type AppointmentRow = {
   session_status?: string;
   queue_state?: string | null;
   queue_checked_in_at?: Date | null;
+  queue_called_at?: Date | null;
+  queue_service_started_at?: Date | null;
+  queue_finished_at?: Date | null;
 };
 
 function toDateOnlyIso(value: Date | string | null | undefined): string | null {
@@ -122,6 +125,9 @@ function mapAppointment(row: AppointmentRow) {
     sessionStatus: row.session_status ?? null,
     queueState: row.queue_state ?? null,
     checkedInAt: row.queue_checked_in_at?.toISOString() ?? null,
+    calledAt: row.queue_called_at?.toISOString() ?? null,
+    consultationStartedAt: row.queue_service_started_at?.toISOString() ?? null,
+    consultationEndedAt: row.queue_finished_at?.toISOString() ?? null,
     queueNumber: row.queue_number,
     queueDisplay: formatQueueDisplay(row.queue_number),
     bookingSource: row.booking_source,
@@ -152,7 +158,10 @@ const APPOINTMENT_SELECT = `
          s.timezone,
          s.status AS session_status,
          q.state AS queue_state,
-         q.checked_in_at AS queue_checked_in_at
+         q.checked_in_at AS queue_checked_in_at,
+         q.called_at AS queue_called_at,
+         q.service_started_at AS queue_service_started_at,
+         q.finished_at AS queue_finished_at
   FROM __SCHEMA__.appointments a
   JOIN __SCHEMA__.patients p ON p.id = a.patient_id
   JOIN __SCHEMA__.consultation_sessions s ON s.id = a.session_id
@@ -347,7 +356,24 @@ export class AppointmentsService {
     return this.sql.withClient(async (client) => {
       const row = await this.loadAppointment(client, ctx.quotedSchema, id);
       if (!row) httpError('APPOINTMENT_NOT_FOUND', 'Appointment not found', 'notfound');
-      return mapAppointment(row);
+      // A rescheduled appointment points staff to the booking that replaced it (the latest in the
+      // reschedule chain), so further reschedule/cancel actions can be taken from it.
+      let rescheduledToId: string | null = null;
+      if (row.status === 'RESCHEDULED') {
+        const latest = await client.query<{ id: string }>(
+          `WITH RECURSIVE chain AS (
+             SELECT id, 1 AS depth FROM ${ctx.quotedSchema}.appointments WHERE rescheduled_from_id = $1
+             UNION ALL
+             SELECT a.id, c.depth + 1 FROM ${ctx.quotedSchema}.appointments a
+             JOIN chain c ON a.rescheduled_from_id = c.id
+             WHERE c.depth < 50
+           )
+           SELECT id FROM chain ORDER BY depth DESC LIMIT 1`,
+          [id],
+        );
+        rescheduledToId = latest.rows[0]?.id ?? null;
+      }
+      return { ...mapAppointment(row), rescheduledToId };
     });
   }
 

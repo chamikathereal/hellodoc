@@ -532,8 +532,14 @@ export function AppointmentBookingDialog({
                 <Label>From date</Label>
                 <Input
                   type="date"
+                  min={clinicTodayIso()}
                   value={sessionDate}
-                  onChange={(e) => setSessionDate(e.target.value)}
+                  onChange={(e) => {
+                    // Appointments cannot be booked in the past: typed past dates snap back to today.
+                    const today = clinicTodayIso();
+                    const next = e.target.value;
+                    setSessionDate(next && next < today ? today : next);
+                  }}
                 />
               </div>
             </div>

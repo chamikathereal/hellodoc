@@ -34,6 +34,7 @@ import { PatientDetailPage } from '@/pages/patient-detail-page';
 import { PatientFormPage } from '@/pages/patient-form-page';
 import { PatientsPage } from '@/pages/patients-page';
 import { DoctorAcceptPage } from '@/pages/doctor-accept-page';
+import { DoctorCalendarPage } from '@/pages/doctor-calendar-page';
 import { DoctorWorklistPage } from '@/pages/doctor-worklist-page';
 import { ConsultationPage } from '@/pages/consultation-page';
 import { NotificationSettingsPage } from '@/pages/notification-settings-page';
@@ -119,6 +120,7 @@ export default function App() {
                 </Route>
                 <Route element={<ClinicLayout title="Doctor" />}>
                   <Route path="/doctor/worklist" element={<DoctorWorklistPage />} />
+                  <Route path="/doctor/calendar" element={<DoctorCalendarPage />} />
                   <Route path="/consultations/:id" element={<ConsultationPage />} />
                 </Route>
                 <Route element={<ClinicLayout title="Billing" />}>

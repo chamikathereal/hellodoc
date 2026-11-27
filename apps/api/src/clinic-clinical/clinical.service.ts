@@ -3,13 +3,15 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { AuditService } from '../audit/audit.service.js';
-import { BillingService } from '../clinic-billing/billing.service.js';
 import type { ClinicContext } from '../clinic-context/clinic-context.service.js';
+import {
+  EMAIL_ALREADY_REGISTERED_MESSAGE,
+  hasConflictingClinicMembership,
+} from '../common/clinic-account-email.js';
 import { normalizeEmail } from '../common/identifiers.js';
 import { validatePasswordStrength } from '../common/password-policy.js';
 import { PasswordService } from '../common/password.service.js';
@@ -46,10 +48,21 @@ export class ClinicalService {
     private readonly prisma: PrismaPlatformService,
     private readonly passwords: PasswordService,
     private readonly audit: AuditService,
-    private readonly billing: BillingService,
   ) {}
 
-  private readonly logger = new Logger(ClinicalService.name);
+  /**
+   * A doctor login may re-use an account that is already this clinic's doctor (re-invite), but not
+   * one with any other active clinic role: a second membership locks the user out of login.
+   */
+  private async assertEmailAvailableForDoctor(emailNormalized: string, tenantId: string) {
+    const existing = await this.prisma.platformUser.findUnique({
+      where: { emailNormalized },
+      select: { memberships: { where: { active: true }, select: { tenantId: true, role: true } } },
+    });
+    if (hasConflictingClinicMembership(existing?.memberships ?? [], { tenantId, role: 'CLINIC_DOCTOR' })) {
+      deny('EMAIL_ALREADY_REGISTERED', EMAIL_ALREADY_REGISTERED_MESSAGE, 'conflict');
+    }
+  }
 
   async invite(ctx: ClinicContext, doctorId: string, dto: InviteDoctorDto) {
     const email = normalizeEmail(dto.email);
@@ -61,6 +74,7 @@ export class ClinicalService {
       return row.rows[0] as { id: string; status: string } | undefined;
     });
     if (!doctor || doctor.status !== 'ACTIVE') deny('DOCTOR_PROFILE_NOT_LINKED', 'Doctor profile not found', 'missing');
+    await this.assertEmailAvailableForDoctor(email, ctx.tenantId);
 
     const raw = randomBytes(32).toString('base64url');
     const tokenHash = createHash('sha256').update(raw).digest('hex');
@@ -120,6 +134,8 @@ export class ClinicalService {
     if (!invite || new Date(invite.expires_at).getTime() < Date.now()) {
       deny('CLINICAL_ACCESS_DENIED', 'Invitation is invalid or expired', 'forbidden');
     }
+    // Re-check at acceptance: the email may have been registered after the invitation was sent.
+    await this.assertEmailAvailableForDoctor(invite.email_normalized, invite.tenant_id);
     const passwordHash = await this.passwords.hash(dto.password);
     let user = await this.prisma.platformUser.findUnique({
       where: { emailNormalized: invite.email_normalized },
@@ -281,7 +297,7 @@ export class ClinicalService {
       );
       const allergies = await this.allergyBundle(client, ctx.quotedSchema, encounter.patient_id as string);
       const prescription = await client.query(
-        `SELECT id, status, version FROM ${ctx.quotedSchema}.prescriptions
+        `SELECT id, status, version, clinical_instructions FROM ${ctx.quotedSchema}.prescriptions
          WHERE encounter_id = $1
          ORDER BY CASE status WHEN 'SIGNED' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END, created_at DESC
          LIMIT 1`,
@@ -291,7 +307,7 @@ export class ClinicalService {
       const prescriptionRow = prescription.rows[0] ?? null;
       const prescriptionItems = prescriptionRow
         ? await client.query(
-            `SELECT medicine_name, dose, frequency FROM ${ctx.quotedSchema}.prescription_items
+            `SELECT medicine_name, dose, frequency, instructions FROM ${ctx.quotedSchema}.prescription_items
              WHERE prescription_id = $1 ORDER BY sort_order`,
             [prescriptionRow.id],
           )
@@ -450,7 +466,29 @@ export class ClinicalService {
               LIMIT 1
             ) AS latest_vitals,
             (
-              SELECT json_build_object('id', p.id, 'status', p.status, 'version', p.version)
+              SELECT json_build_object(
+                'id', p.id,
+                'status', p.status,
+                'version', p.version,
+                -- Medicines and notes are shown in medical history once the prescription is signed.
+                'clinical_instructions', CASE WHEN p.status = 'SIGNED' THEN p.clinical_instructions END,
+                'items', CASE WHEN p.status = 'SIGNED' THEN (
+                  SELECT COALESCE(
+                    json_agg(
+                      json_build_object(
+                        'medicine_name', i.medicine_name,
+                        'dose', i.dose,
+                        'frequency', i.frequency,
+                        'instructions', i.instructions
+                      )
+                      ORDER BY i.sort_order
+                    ),
+                    '[]'::json
+                  )
+                  FROM ${ctx.quotedSchema}.prescription_items i
+                  WHERE i.prescription_id = p.id
+                ) ELSE '[]'::json END
+              )
               FROM ${ctx.quotedSchema}.prescriptions p
               WHERE p.encounter_id = e.id
               ORDER BY CASE p.status WHEN 'SIGNED' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END, p.created_at DESC
@@ -683,45 +721,9 @@ export class ClinicalService {
         [id, ctx.doctorId, ctx.userId, dto.version],
       );
       if (!updated.rows[0]) deny('INVALID_CLINICAL_TRANSITION', 'Prescription cannot be signed', 'conflict');
-      const signed = await this.getPrescription(ctx, id);
-      const invoice = await this.draftInvoiceForPrescription(ctx, id);
-      return { ...signed, invoice };
+      // Billing is done by the cashier in POS: the signed prescription's appointment is listed there.
+      return this.getPrescription(ctx, id);
     });
-  }
-
-  /**
-   * After signing, raise a draft invoice (consultation fee + prescribed medicines) for the cashier.
-   * Billing problems never undo the signature; they are logged and the cashier can bill manually.
-   */
-  private async draftInvoiceForPrescription(ctx: ClinicContext & { doctorId: string }, prescriptionId: string) {
-    try {
-      const rx = await this.sql.withClient(async (client) => {
-        const row = await client.query<{ appointment_id: string; patient_id: string }>(
-          `SELECT e.appointment_id, p.patient_id
-           FROM ${ctx.quotedSchema}.prescriptions p
-           JOIN ${ctx.quotedSchema}.clinical_encounters e ON e.id = p.encounter_id
-           WHERE p.id = $1`,
-          [prescriptionId],
-        );
-        const items = await client.query<{ medicine_name: string; dose: string | null; frequency: string | null }>(
-          `SELECT medicine_name, dose, frequency FROM ${ctx.quotedSchema}.prescription_items
-           WHERE prescription_id = $1 ORDER BY sort_order`,
-          [prescriptionId],
-        );
-        return row.rows[0] ? { ...row.rows[0], items: items.rows } : null;
-      });
-      if (!rx) return null;
-      return await this.billing.createDraftForPrescription(ctx, {
-        appointmentId: rx.appointment_id,
-        patientId: rx.patient_id,
-        medicines: rx.items.map((item) => ({ name: item.medicine_name, dose: item.dose, frequency: item.frequency })),
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Draft invoice for prescription ${prescriptionId} failed: ${error instanceof Error ? error.message : 'unknown'}`,
-      );
-      return null;
-    }
   }
 
   async voidPrescription(ctx: ClinicContext & { doctorId: string }, id: string, dto: VoidPrescriptionDto) {
@@ -884,7 +886,7 @@ export class ClinicalService {
         <p class="meta">Prescriber: ${esc(clinic.doctor?.display_name)}${clinic.doctor?.credential_review_status === 'VERIFIED' ? ` · ${esc(clinic.doctor?.registration_number)}` : ''}</p>
         <p class="meta">Status: ${esc(rx.status)} · ${signedAt}</p>
         <table><thead><tr><th>#</th><th>Medicine</th><th>Strength</th><th>Dose</th><th>Frequency</th><th>Duration</th><th>Instructions</th></tr></thead><tbody>${items}</tbody></table>
-        <p>${esc(rx.clinical_instructions)}</p>
+        ${rx.clinical_instructions ? `<p><strong>Additional notes:</strong> ${esc(rx.clinical_instructions)}</p>` : ''}
         <p class="footer">This document is an authenticated clinic record, not a qualified digital signature. Use Print / Save as PDF to download a PDF copy.</p>
       </div>
       </body></html>`;

@@ -10,7 +10,7 @@
     "prebuild": "prisma generate",
     "build": "nest build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test ./test/unit/identifiers.test.ts ./test/unit/password-policy.test.ts ./test/unit/session-rules.test.ts ./test/unit/patient-phone.test.ts ./test/unit/appointment-rules.test.ts ./test/unit/queue-state.test.ts ./test/unit/notification-render.test.ts ./test/unit/payload-crypto.test.ts ./test/unit/fake-sms.provider.test.ts ./test/unit/smslenz-send.test.ts ./test/unit/sms-gateway-enqueue.test.ts ./test/unit/money-totp.test.ts ./test/unit/production-config.test.ts",
+    "test": "node --import tsx --test ./test/unit/identifiers.test.ts ./test/unit/password-policy.test.ts ./test/unit/session-rules.test.ts ./test/unit/patient-phone.test.ts ./test/unit/appointment-rules.test.ts ./test/unit/queue-state.test.ts ./test/unit/notification-render.test.ts ./test/unit/payload-crypto.test.ts ./test/unit/fake-sms.provider.test.ts ./test/unit/smslenz-send.test.ts ./test/unit/sms-gateway-enqueue.test.ts ./test/unit/money-totp.test.ts ./test/unit/production-config.test.ts ./test/unit/clinic-account-email.test.ts",
     "backup:check": "node --env-file=.env scripts/restore-check.mjs",
     "inventory:classify": "node --env-file=.env scripts/classify-local-inventory.mjs",
     "mfa:check": "node --env-file=.env scripts/mfa-enforcement-check.mjs",
